@@ -1789,19 +1789,49 @@ def get_notification_service() -> NotificationService:
 def send_daily_report(results: List[AnalysisResult]) -> bool:
     """
     发送每日报告的快捷方式
-    
-    自动识别渠道并推送
+
+    行为说明：
+    1. 原有通知渠道（TELEGRAM_CHAT_ID / 企业微信 / 飞书等）保持不变。
+    2. 若配置了 SUBSCRIPTION_BOT_TOKEN，同时触发订阅广播，
+       按用户套餐将对应个股报告推送给数据库中的各订阅用户。
+    3. 未配置 SUBSCRIPTION_BOT_TOKEN 时，行为与原来完全一致（向后兼容）。
     """
+    import os
+
     service = get_notification_service()
-    
-    # 生成报告
+
+    # 生成汇总报告（用于原有渠道推送）
     report = service.generate_daily_report(results)
-    
+
     # 保存到本地
     service.save_report_to_file(report)
-    
-    # 推送到配置的渠道（自动识别）
-    return service.send(report)
+
+    # 推送到原有渠道（自动识别：Telegram 单播 / 企业微信 / 飞书 / 邮件等）
+    legacy_ok = service.send(report)
+
+    # 订阅广播：仅在 SUBSCRIPTION_BOT_TOKEN 配置时启用
+    if os.environ.get("SUBSCRIPTION_BOT_TOKEN"):
+        try:
+            from src.bot.broadcaster import broadcast_daily_report
+
+            # 按个股生成独立报告，供 broadcaster 按用户自选股分发
+            stock_reports: Dict[str, str] = {}
+            for result in results:
+                try:
+                    stock_report = service.generate_stock_report(result)
+                    stock_reports[result.code] = stock_report
+                except Exception as e:
+                    logger.warning("生成个股报告失败: code=%s error=%s", getattr(result, 'code', '?'), e)
+
+            stats = broadcast_daily_report(stock_reports=stock_reports)
+            logger.info(
+                "订阅广播完成: sent=%d failed=%d skipped=%d",
+                stats.get("sent", 0), stats.get("failed", 0), stats.get("skipped", 0),
+            )
+        except Exception as e:
+            logger.error("订阅广播异常（不影响原有渠道推送）: %s", e)
+
+    return legacy_ok
 
 
 if __name__ == "__main__":

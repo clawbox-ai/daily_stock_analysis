@@ -19,6 +19,10 @@ TIER_PRO = "pro"
 
 ALL_TIERS = (TIER_FREE, TIER_PRO)
 
+# Pricing
+PRO_PRICE_USD = 9.00
+PRO_DURATION_DAYS = 30  # 1 month
+
 
 @dataclass
 class TierConfig:

@@ -607,6 +607,118 @@ async def _run_and_send_analysis(update: Update, ticker: str, context: ContextTy
         )
 
 
+async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/pay — Show payment options to upgrade to Pro"""
+    from src.bot.payment import get_payment_info, TRON_USDT_WALLET, TON_WALLET, TON_AMOUNT, TRON_USDT_AMOUNT
+    from src.bot.tiers import PRO_PRICE_USD, PRO_DURATION_DAYS
+
+    user = update.effective_user
+    if user is None:
+        return
+
+    db_user = db.get_user(user.id)
+    if not db_user:
+        db_user = db.create_user(telegram_id=user.id, username=user.username)
+
+    # Already Pro?
+    if db_user["tier"] == TIER_PRO:
+        expires = db_user.get("expires_at", "")
+        await update.message.reply_text(
+            f"💎 You're already on *Pro*!\n\n"
+            f"Expires: {expires[:10] if expires else 'N/A'}\n"
+            f"To renew, use /pay when your subscription is expiring.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    info = get_payment_info(user.id)
+    memo = info["memo"]
+
+    text = (
+        "💎 *Upgrade to Pro* — $9/month\n\n"
+        "20-stock watchlist • Unlimited analysis • Daily email delivery\n"
+        "Market review • Priority processing\n\n"
+        "Choose your payment method:\n"
+    )
+
+    keyboard = []
+
+    if TON_WALLET:
+        text += f"\n🟦 *TON (Toncoin)*\n"
+        text += f"Send *{TON_AMOUNT} TON* to:\n"
+        text += f"`{TON_WALLET}`\n"
+        text += f"Memo: `{memo}`\n\n"
+        keyboard.append([InlineKeyboardButton("✅ I've sent TON", callback_data="pay_check_ton")])
+
+    text += f"🟡 *USDT on TRON (TRC-20)*\n"
+    text += f"Send *{TRON_USDT_AMOUNT} USDT* to:\n"
+    text += f"`{TRON_USDT_WALLET}`\n"
+    text += f"Memo: `{memo}`\n\n"
+    text += f"_Your memo is unique — include it in the transfer so we can identify your payment._\n\n"
+    text += f"⏳ Pro activates within minutes after payment is confirmed.\n"
+    text += f"Use /check to verify your payment."
+
+    keyboard.append([InlineKeyboardButton("✅ I've sent USDT (TRC-20)", callback_data="pay_check_tron")])
+    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="cmd_subscribe")])
+
+    await update.message.reply_text(
+        text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def cmd_check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/check — Check if your crypto payment was received"""
+    from src.bot.payment import check_all_payments, process_payment
+
+    user = update.effective_user
+    if user is None:
+        return
+
+    db_user = db.get_user(user.id)
+    if not db_user:
+        db_user = db.create_user(telegram_id=user.id, username=user.username)
+
+    if db_user["tier"] == TIER_PRO:
+        expires = db_user.get("expires_at", "")
+        await update.message.reply_text(
+            f"💎 You're already on *Pro*!\nExpires: {expires[:10] if expires else 'N/A'}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    await update.message.reply_text("🔍 Checking for your payment...")
+
+    payment = check_all_payments(user.id)
+    if payment:
+        success = await process_payment(user.id, payment)
+        if success:
+            await update.message.reply_text(
+                f"✅ *Payment confirmed!*\n\n"
+                f"💎 You're now on *Pro*!\n"
+                f"Type: {payment['type']}\n"
+                f"Amount: {payment['amount']}\n"
+                f"TX: `{payment.get('tx_hash', 'N/A')[:16]}...`\n\n"
+                f"Welcome aboard! Use /analyze to get started.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        else:
+            await update.message.reply_text(
+                "⚠️ Payment found but upgrade failed. Please try /check again or contact support.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+    else:
+        info = get_payment_info(user.id)
+        await update.message.reply_text(
+            f"❌ No payment found yet.\n\n"
+            f"Make sure you included memo: `{info['memo']}`\n"
+            f"Payments can take 1-5 minutes to confirm.\n"
+            f"Try /check again in a minute.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+
 async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/dashboard — Decision Dashboard for all watchlist stocks (Pro only)"""
     user = update.effective_user
@@ -999,6 +1111,44 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "Re-enable anytime with `/email your@email.com`",
             parse_mode=ParseMode.MARKDOWN,
         )
+
+    elif data == "pay_check_ton" or data == "pay_check_tron":
+        # Check payment from inline button
+        from src.bot.payment import check_all_payments, process_payment
+        db_user = db.get_user(user.id) or db.create_user(telegram_id=user.id, username=user.username)
+        if db_user["tier"] == TIER_PRO:
+            await query.edit_message_text("💎 You're already on Pro!")
+            return
+
+        await query.edit_message_text("🔍 Checking for your payment...")
+        payment = check_all_payments(user.id)
+        if payment:
+            success = await process_payment(user.id, payment)
+            if success:
+                keyboard = [
+                    [InlineKeyboardButton("🔍 Analyze", callback_data="cmd_analyze_prompt")],
+                    [InlineKeyboardButton("📊 Dashboard", callback_data="cmd_dashboard")],
+                ]
+                await query.edit_message_text(
+                    f"✅ *Payment confirmed!*\n\n"
+                    f"💎 You're now on *Pro*!\n"
+                    f"Type: {payment['type']}\n"
+                    f"Amount: {payment['amount']}\n\n"
+                    f"Welcome aboard!",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+            else:
+                await query.edit_message_text("⚠️ Payment found but upgrade failed. Try /check again.")
+        else:
+            info = get_payment_info(user.id)
+            await query.edit_message_text(
+                f"❌ No payment found yet.\n\n"
+                f"Make sure you included memo: `{info['memo']}`\n"
+                f"Payments can take 1-5 minutes.\n"
+                f"Try /check again in a minute.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
 
     elif data == "cmd_email_view":
         # Re-show /email settings
@@ -1683,6 +1833,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("analyze", cmd_analyze))
     app.add_handler(CommandHandler("email", cmd_email))
     app.add_handler(CommandHandler("dashboard", cmd_dashboard))
+    app.add_handler(CommandHandler("pay", cmd_pay))
+    app.add_handler(CommandHandler("check", cmd_check_payment))
 
     # Register callback query handler (button presses)
     app.add_handler(CallbackQueryHandler(button_callback))
@@ -1702,6 +1854,8 @@ async def _set_bot_commands(app: Application) -> None:
         BotCommand("analyze", "On-demand stock analysis (Pro)"),
         BotCommand("email", "Set email for daily analysis delivery (Pro)"),
         BotCommand("dashboard", "Decision Dashboard for watchlist"),
+        BotCommand("pay", "Upgrade to Pro with crypto"),
+        BotCommand("check", "Check if your payment was received"),
     ]
     await app.bot.set_my_commands(commands)
     logger.info("Telegram command menu updated")

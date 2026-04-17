@@ -98,6 +98,39 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN delivery_time_change TEXT")
     except Exception:
         pass
+
+    # Create payments table
+    try:
+        with _get_conn() as conn:
+            conn.execute("""CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                payment_type TEXT NOT NULL,
+                amount REAL NOT NULL,
+                tx_hash TEXT DEFAULT '',
+                from_address TEXT DEFAULT '',
+                status TEXT DEFAULT 'confirmed',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (telegram_id) REFERENCES users(telegram_id)
+            )""")
+    except Exception:
+        pass
+
+    # Create pending_payments table
+    try:
+        with _get_conn() as conn:
+            conn.execute("""CREATE TABLE IF NOT EXISTS pending_payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                payment_type TEXT NOT NULL,
+                sender_address TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY (telegram_id) REFERENCES users(telegram_id)
+            )""")
+    except Exception:
+        pass
+
     logger.info("Database initialized: %s", _get_db_path())
 
 
@@ -299,6 +332,57 @@ def get_email_schedule(telegram_id: int) -> dict:
         "delivery_time": user.get("delivery_time", "08:00"),
         "delivery_time_change": user.get("delivery_time_change"),
     }
+
+
+# ===========================
+# Payments
+# ===========================
+
+def record_payment(telegram_id: int, payment_type: str, amount: float, tx_hash: str = "", from_address: str = "") -> bool:
+    """Record a confirmed payment"""
+    now = _now_iso()
+    with _get_conn() as conn:
+        cursor = conn.execute(
+            "INSERT INTO payments (telegram_id, payment_type, amount, tx_hash, from_address, status, created_at) VALUES (?, ?, ?, ?, ?, 'confirmed', ?)",
+            (telegram_id, payment_type, amount, tx_hash, from_address, now),
+        )
+    return cursor.rowcount > 0
+
+
+def get_pending_payment(telegram_id: int, payment_type: str) -> Optional[dict]:
+    """Get a user's pending payment for a given type"""
+    now = _now_iso()
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM pending_payments WHERE telegram_id = ? AND payment_type = ? AND expires_at > ? ORDER BY created_at DESC LIMIT 1",
+            (telegram_id, payment_type, now),
+        ).fetchone()
+    if row:
+        return dict(row)
+    return None
+
+
+def create_pending_payment(telegram_id: int, payment_type: str, sender_address: str = "", hours_valid: int = 24) -> dict:
+    """Create a pending payment request"""
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(hours=hours_valid)
+    with _get_conn() as conn:
+        cursor = conn.execute(
+            "INSERT INTO pending_payments (telegram_id, payment_type, sender_address, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+            (telegram_id, payment_type, sender_address, now.isoformat(), expires.isoformat()),
+        )
+    return {"telegram_id": telegram_id, "payment_type": payment_type, "expires_at": expires.isoformat()}
+
+
+def get_payment_history(telegram_id: int, limit: int = 10) -> list[dict]:
+    """Get user's payment history"""
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM payments WHERE telegram_id = ? ORDER BY created_at DESC LIMIT ?",
+            (telegram_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ===========================

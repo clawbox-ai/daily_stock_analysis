@@ -124,71 +124,96 @@ def generate_watchlist_email(tickers: list[str], username: str) -> tuple[str, st
 <html>
 <head>
 <style>
-body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f0f0f; color: #e0e0e0; margin: 0; padding: 20px; }}
-.container {{ max-width: 600px; margin: 0 auto; }}
-.header {{ text-align: center; padding: 20px; border-bottom: 2px solid #333; }}
-.header h1 {{ color: #00ff88; margin: 0; }}
-.summary {{ background: #1a1a1a; border-radius: 8px; padding: 15px; margin: 15px 0; text-align: center; }}
-.section {{ background: #1a1a1a; border-radius: 8px; padding: 15px; margin: 10px 0; }}
-.section h2 {{ margin-top: 0; }}
-.buy {{ border-left: 3px solid #00ff88; }}
-.watch {{ border-left: 3px solid #ffcc00; }}
-.sell {{ border-left: 3px solid #ff4444; }}
-.stock-row {{ display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #2a2a2a; }}
-.stock-ticker {{ font-weight: bold; font-family: monospace; }}
-.score {{ font-weight: bold; }}
-.score-high {{ color: #00ff88; }}
-.score-mid {{ color: #ffcc00; }}
-.score-low {{ color: #ff4444; }}
-.footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
-a {{ color: #00ff88; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #222; margin: 0; padding: 20px; }}
+.container {{ max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 12px; overflow: hidden; }}
+.header {{ background: #1a1a2e; padding: 24px 20px; text-align: center; }}
+.header h1 {{ color: #ffffff; margin: 0; font-size: 24px; }}
+.header p {{ color: #aab; margin: 6px 0 0; font-size: 14px; }}
+.summary {{ display: flex; justify-content: center; gap: 20px; padding: 16px 20px; background: #f8f9fa; border-bottom: 1px solid #eee; }}
+.summary-item {{ text-align: center; }}
+.summary-item .count {{ font-size: 24px; font-weight: bold; }}
+.summary-item .label {{ font-size: 12px; color: #666; }}
+.section {{ padding: 0 20px; margin: 0; }}
+.section-title {{ padding: 16px 0 8px; font-size: 18px; margin: 0; }}
+.stock-card {{ background: #f8f9fa; border-radius: 8px; padding: 14px 16px; margin: 8px 0; border-left: 4px solid #ccc; }}
+.stock-card.buy {{ border-left-color: #00c853; }}
+.stock-card.watch {{ border-left-color: #ff9800; }}
+.stock-card.sell {{ border-left-color: #f44336; }}
+.ticker {{ font-size: 20px; font-weight: 800; color: #111; font-family: 'SF Mono', 'Consolas', monospace; letter-spacing: 0.5px; }}
+.signal {{ font-size: 14px; font-weight: 600; margin-left: 8px; }}
+.signal-buy {{ color: #00c853; }}
+.signal-watch {{ color: #ff9800; }}
+.signal-sell {{ color: #f44336; }}
+.score-badge {{ display: inline-block; background: #e8f5e9; color: #2e7d32; border-radius: 12px; padding: 2px 10px; font-weight: 700; font-size: 13px; }}
+.score-badge.mid {{ background: #fff3e0; color: #e65100; }}
+.score-badge.low {{ background: #ffebee; color: #c62828; }}
+.details {{ font-size: 13px; color: #555; margin-top: 4px; }}
+.footer {{ text-align: center; padding: 20px; color: #999; font-size: 12px; border-top: 1px solid #eee; }}
+.footer a {{ color: #1a1a2e; }}
 </style>
 </head>
 <body>
 <div class="container">
 <div class="header">
 <h1>📊 StockAnalyst Daily</h1>
-<p>{date_str} — Analyzed {len(entries)} stocks</p>
+<p>{date_str} — {len(entries)} stocks analyzed</p>
 </div>
 <div class="summary">
-<strong>🟢 Buy: {len(buy)}</strong> &nbsp;|&nbsp; <strong>🟡 Watch: {len(watch)}</strong> &nbsp;|&nbsp; <strong>🔴 Sell: {len(sell)}</strong>
+<div class="summary-item"><div class="count" style="color:#00c853">{len(buy)}</div><div class="label">Buy</div></div>
+<div class="summary-item"><div class="count" style="color:#ff9800">{len(watch)}</div><div class="label">Watch</div></div>
+<div class="summary-item"><div class="count" style="color:#f44336">{len(sell)}</div><div class="label">Sell</div></div>
 </div>
 """
 
     if buy:
-        html += '<div class="section buy"><h2>🟢 Buy</h2>'
+        html += '<div class="section"><h2 class="section-title" style="color:#00c853">🟢 Buy</h2>'
         for e in buy:
-            sc = "score-high" if e["score"] >= 70 else "score-mid"
             pd = e["price_data"]
             price = pd.get("Price", "N/A")
             change = pd.get("Change", "")
-            html += f'<div class="stock-row"><span class="stock-ticker">{e["ticker"]}</span><span class="score {sc}">{e["score"]} — {e["signal"]}</span></div>'
-            html += f'<div class="stock-row" style="font-size:13px;color:#aaa"><span>{price} {change}</span><span>RSI: {pd.get("RSI (14)","—")} | MACD: {pd.get("MACD Signal","—")}</span></div>'
+            score_class = "" if e["score"] >= 70 else "mid"
+            html += f'''
+<div class="stock-card buy">
+  <span class="ticker">{e["ticker"]}</span>
+  <span class="signal signal-buy">{e["signal"]}</span>
+  <span class="score-badge {score_class}">{e["score"]}</span>
+  <div class="details">{price} {change} &bull; RSI: {pd.get("RSI (14)","—")} &bull; MACD: {pd.get("MACD Signal","—")}</div>
+</div>'''
         html += '</div>'
 
     if watch:
-        html += '<div class="section watch"><h2>🟡 Watch</h2>'
+        html += '<div class="section"><h2 class="section-title" style="color:#ff9800">🟡 Watch</h2>'
         for e in watch:
             pd = e["price_data"]
             price = pd.get("Price", "N/A")
             change = pd.get("Change", "")
-            html += f'<div class="stock-row"><span class="stock-ticker">{e["ticker"]}</span><span class="score score-mid">{e["score"]} — {e["signal"]}</span></div>'
-            html += f'<div class="stock-row" style="font-size:13px;color:#aaa"><span>{price} {change}</span><span>RSI: {pd.get("RSI (14)","—")} | MACD: {pd.get("MACD Signal","—")}</span></div>'
+            html += f'''
+<div class="stock-card watch">
+  <span class="ticker">{e["ticker"]}</span>
+  <span class="signal signal-watch">{e["signal"]}</span>
+  <span class="score-badge mid">{e["score"]}</span>
+  <div class="details">{price} {change} &bull; RSI: {pd.get("RSI (14)","—")} &bull; MACD: {pd.get("MACD Signal","—")}</div>
+</div>'''
         html += '</div>'
 
     if sell:
-        html += '<div class="section sell"><h2>🔴 Sell</h2>'
+        html += '<div class="section"><h2 class="section-title" style="color:#f44336">🔴 Sell</h2>'
         for e in sell:
             pd = e["price_data"]
             price = pd.get("Price", "N/A")
             change = pd.get("Change", "")
-            html += f'<div class="stock-row"><span class="stock-ticker">{e["ticker"]}</span><span class="score score-low">{e["score"]} — {e["signal"]}</span></div>'
-            html += f'<div class="stock-row" style="font-size:13px;color:#aaa"><span>{price} {change}</span><span>RSI: {pd.get("RSI (14)","—")} | MACD: {pd.get("MACD Signal","—")}</span></div>'
+            html += f'''
+<div class="stock-card sell">
+  <span class="ticker">{e["ticker"]}</span>
+  <span class="signal signal-sell">{e["signal"]}</span>
+  <span class="score-badge low">{e["score"]}</span>
+  <div class="details">{price} {change} &bull; RSI: {pd.get("RSI (14)","—")} &bull; MACD: {pd.get("MACD Signal","—")}</div>
+</div>'''
         html += '</div>'
 
     html += f"""
 <div class="footer">
-<p>StockAnalyst Bot — <a href="https://t.me/claw_analyst_bot">@claw_analyst_bot</a></p>
+<p>StockAnalyst Bot &mdash; <a href="https://t.me/claw_analyst_bot">@claw_analyst_bot</a></p>
 <p>Use /analyze TICKER in the bot for full Battle Plan analysis</p>
 <p>Unsubscribe: /email off in the bot</p>
 </div>

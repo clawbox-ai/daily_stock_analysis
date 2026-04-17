@@ -1,0 +1,8 @@
+# 订阅机器人额外依赖
+# 主项目已有 requests，此处仅列出新增项
+
+# Telegram Bot SDK（异步版，>=20.0 使用 python-telegram-bot v20+ API）
+python-telegram-bot>=20.0
+
+# 环境变量加载（项目已有 python-dotenv，列于此作说明）
+python-dotenv>=1.0.0

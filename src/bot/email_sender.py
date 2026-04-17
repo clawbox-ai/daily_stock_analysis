@@ -8,7 +8,7 @@ Uses Resend API (100 emails/day free).
 import json
 import logging
 import os
-from datetime import datetime, timezone as tz
+from datetime import datetime, timezone
 from typing import Optional
 
 import requests
@@ -19,7 +19,7 @@ from src.bot.tiers import TIER_PRO
 logger = logging.getLogger(__name__)
 
 RESEND_API_URL = "https://api.resend.com/emails"
-FROM_EMAIL = "StockAnalyst <stockanalyst@clawbox.ai>"  # Update domain when verified
+FROM_EMAIL = "StockAnalyst <stockanalyst@clawboxai.org>"
 
 
 def _get_resend_key() -> Optional[str]:
@@ -86,7 +86,7 @@ def generate_watchlist_email(tickers: list[str], username: str) -> tuple[str, st
     """
     from src.bot.subscription_bot import _fetch_comprehensive_data, _calculate_deterministic_score
 
-    date_str = datetime.now(tz(tz.utc)).strftime("%Y-%m-%d")
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     # Analyze all tickers
     entries = []

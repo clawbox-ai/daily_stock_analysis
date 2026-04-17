@@ -31,6 +31,7 @@ class TierConfig:
     daily_broadcast: bool           # Whether daily broadcast is received
     market_review: bool              # Whether market review is received
     priority_analysis: bool          # Whether priority analysis is enabled
+    email_delivery: bool            # Whether full analysis is delivered via email
     description: str = ""            # Tier description (shown to users)
 
 
@@ -48,7 +49,8 @@ TIER_CONFIGS: dict[str, TierConfig] = {
         daily_broadcast=True,
         market_review=False,
         priority_analysis=False,
-        description="Daily broadcasts for default stocks + 1 free analysis/day. Upgrade to Pro for full access.",
+        email_delivery=False,
+        description="Daily broadcast with random stock Battle Plan. Upgrade to Pro for unlimited access + email delivery.",
     ),
     TIER_PRO: TierConfig(
         name=TIER_PRO,
@@ -59,7 +61,8 @@ TIER_CONFIGS: dict[str, TierConfig] = {
         daily_broadcast=True,
         market_review=True,
         priority_analysis=True,
-        description="20-stock watchlist, on-demand analysis, daily market review, priority processing. Full access.",
+        email_delivery=True,
+        description="20-stock watchlist, on-demand analysis, daily market review, email delivery, priority processing. Full access.",
     ),
 }
 
@@ -111,6 +114,8 @@ def format_tier_menu() -> str:
             features.append("Market Review")
         if cfg.priority_analysis:
             features.append("Priority Processing")
+        if cfg.email_delivery:
+            features.append("Email Delivery")
 
         lines.append(
             f"*{cfg.label}* — {price}\n"

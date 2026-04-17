@@ -158,6 +158,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/remove `<ticker>` — Remove stock from watchlist\n"
         "              Example: `/remove AAPL`\n"
         "/analyze `<ticker>` — Run analysis on a stock\n"
+        "/email `<email>` — Set email for daily delivery (Pro)\n"
         "              Example: `/analyze BTC-USD`\n"
         "/dashboard — Decision Dashboard for watchlist\n"
         "              Scores all stocks: Buy/Watch/Sell\n\n"
@@ -338,6 +339,77 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
 
 
+async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/email <address> — Set email for Pro daily analysis delivery"""
+    user = update.effective_user
+    if user is None:
+        return
+
+    db_user = db.get_user(user.id)
+    if not db_user:
+        db_user = db.create_user(telegram_id=user.id, username=user.username)
+
+    tier = db_user["tier"]
+
+    if tier == TIER_FREE:
+        await update.message.reply_text(
+            "⚠️ Email delivery is a *Pro* feature.\n\n"
+            "Upgrade to Pro to receive your full watchlist analysis by email every day.\n"
+            "Use /subscribe to upgrade.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_subscribe_keyboard(tier),
+        )
+        return
+
+    args = context.args
+    if not args:
+        current_email = db.get_email(user.id)
+        if current_email:
+            await update.message.reply_text(
+                f"📧 *Email Delivery*\n\n"
+                f"Current email: `{current_email}`\n\n"
+                f"Your full watchlist analysis is delivered daily to this address.\n\n"
+                f"To change: `/email new@example.com`\n"
+                f"To remove: `/email off`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        else:
+            await update.message.reply_text(
+                "📧 *Email Delivery*\n\n"
+                "No email set. Add one to receive your daily watchlist analysis:\n\n"
+                "`/email your@email.com`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        return
+
+    email_input = args[0].strip().lower()
+
+    if email_input in ("off", "remove", "delete", "none"):
+        db.set_email(user.id, None)
+        await update.message.reply_text(
+            "📧 Email delivery turned off. You'll still receive Telegram broadcasts.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    # Basic email validation
+    if "@" not in email_input or "." not in email_input.split("@")[-1]:
+        await update.message.reply_text(
+            "❌ That doesn't look like a valid email. Example: `/email john@gmail.com`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    db.set_email(user.id, email_input)
+    await update.message.reply_text(
+        f"✅ Email set to `{email_input}`\n\n"
+        f"📧 Your full watchlist analysis will be delivered to this address daily.\n"
+        f"Change anytime with `/email new@example.com`\n"
+        f"Turn off with `/email off`",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/analyze <ticker> — Run on-demand analysis (Pro only)"""
     user = update.effective_user
@@ -351,20 +423,17 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     tier = db_user["tier"]
 
     if tier == TIER_FREE:
-        # Free users get 1 analyze/day — check if they've used it
-        today_key = f"free_analyze_{user.id}"
-        used_today = context.user_data.get(today_key, 0)
-        if used_today >= 1:
-            await update.message.reply_text(
-                "⚠️ Free plan allows *1 analysis per day*.\n\n"
-                "💎 Upgrade to Pro for unlimited analyses + custom watchlist.\n"
-                "Use /subscribe to upgrade.",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=_subscribe_keyboard(tier),
-            )
-            return
+        await update.message.reply_text(
+            "⚠️ On-demand analysis is a *Pro* feature.\n\n"
+            "🆓 Free plan includes a *daily random stock Battle Plan* broadcast — no requests needed!\n\n"
+            "💎 Upgrade to Pro for unlimited analyses + custom watchlist + email delivery.\n"
+            "Use /subscribe to upgrade.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_subscribe_keyboard(tier),
+        )
+        return
 
-    if not can_use_on_demand(tier) and tier != TIER_FREE:
+    if not can_use_on_demand(tier):
         tier_cfg = get_tier_config(tier)
         await update.message.reply_text(
             f"⚠️ On-demand analysis is a *Pro* feature.\n\n"
@@ -407,12 +476,6 @@ async def _run_and_send_analysis(update: Update, ticker: str, context: ContextTy
             None, _run_single_stock_analysis, ticker, update.effective_user.id
         )
         await update.message.reply_text(result_text, parse_mode=ParseMode.MARKDOWN)
-        # Track free user daily usage
-        if context and update.effective_user:
-            db_user = db.get_user(update.effective_user.id)
-            if db_user and db_user["tier"] == TIER_FREE:
-                today_key = f"free_analyze_{update.effective_user.id}"
-                context.user_data[today_key] = context.user_data.get(today_key, 0) + 1
     except Exception as e:
         logger.error("On-demand analysis failed: ticker=%s error=%s", ticker, e)
         await update.message.reply_text(
@@ -1265,6 +1328,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("add", cmd_add))
     app.add_handler(CommandHandler("remove", cmd_remove))
     app.add_handler(CommandHandler("analyze", cmd_analyze))
+    app.add_handler(CommandHandler("email", cmd_email))
     app.add_handler(CommandHandler("dashboard", cmd_dashboard))
 
     # Register callback query handler (button presses)
@@ -1283,7 +1347,8 @@ async def _set_bot_commands(app: Application) -> None:
         BotCommand("add", "Add stock to watchlist (Pro)"),
         BotCommand("remove", "Remove stock from watchlist (Pro)"),
         BotCommand("analyze", "On-demand stock analysis (Pro)"),
-        BotCommand("dashboard", "Decision Dashboard for watchlist (Pro)"),
+        BotCommand("email", "Set email for daily analysis delivery (Pro)"),
+        BotCommand("dashboard", "Decision Dashboard for watchlist"),
     ]
     await app.bot.set_my_commands(commands)
     logger.info("Telegram command menu updated")

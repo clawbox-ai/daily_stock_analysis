@@ -77,6 +77,12 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_payments_telegram_id
                 ON payments(telegram_id);
         """)
+    # Migration: add email column if missing
+    try:
+        with _get_conn() as conn:
+            conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
+    except Exception:
+        pass  # Column already exists
     logger.info("Database initialized: %s", _get_db_path())
 
 
@@ -203,6 +209,24 @@ def get_payments(telegram_id: int) -> List[dict]:
             (telegram_id,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_email(telegram_id: int) -> Optional[str]:
+    """Get user's email address"""
+    user = get_user(telegram_id)
+    if not user:
+        return None
+    return user.get("email")
+
+
+def set_email(telegram_id: int, email: str) -> bool:
+    """Set user's email address for Pro email delivery"""
+    with _get_conn() as conn:
+        cursor = conn.execute(
+            "UPDATE users SET email = ? WHERE telegram_id = ?",
+            (email, telegram_id),
+        )
+    return cursor.rowcount > 0
 
 
 # ===========================

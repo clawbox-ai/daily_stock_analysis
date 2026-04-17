@@ -48,18 +48,18 @@ TIER_CONFIGS: dict[str, TierConfig] = {
         daily_broadcast=True,
         market_review=False,
         priority_analysis=False,
-        description="Receive daily analysis broadcasts for default stocks. No configuration needed.",
+        description="Daily broadcasts for default stocks + 1 free analysis/day. Upgrade to Pro for full access.",
     ),
     TIER_PRO: TierConfig(
         name=TIER_PRO,
         label="Pro",
         price_monthly=9.0,
-        max_watchlist=None,           # Unlimited
+        max_watchlist=20,            # 20 stock limit
         on_demand_analysis=True,
         daily_broadcast=True,
         market_review=True,
         priority_analysis=True,
-        description="Unlimited watchlist, on-demand analysis, daily market review, priority processing. Full access.",
+        description="20-stock watchlist, on-demand analysis, daily market review, priority processing. Full access.",
     ),
 }
 
@@ -101,7 +101,7 @@ def format_tier_menu() -> str:
     for tier_key in ALL_TIERS:
         cfg = TIER_CONFIGS[tier_key]
         price = "Free" if cfg.price_monthly == 0 else f"${cfg.price_monthly:.0f}/mo"
-        watchlist = "Default stocks" if tier_key == TIER_FREE else "Unlimited"
+        watchlist = "Default stocks" if tier_key == TIER_FREE else f"Up to {cfg.max_watchlist}"
         features = []
         if cfg.daily_broadcast:
             features.append("Daily Broadcast")

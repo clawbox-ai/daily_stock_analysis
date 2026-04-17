@@ -350,7 +350,21 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     tier = db_user["tier"]
 
-    if not can_use_on_demand(tier):
+    if tier == TIER_FREE:
+        # Free users get 1 analyze/day — check if they've used it
+        today_key = f"free_analyze_{user.id}"
+        used_today = context.user_data.get(today_key, 0)
+        if used_today >= 1:
+            await update.message.reply_text(
+                "⚠️ Free plan allows *1 analysis per day*.\n\n"
+                "💎 Upgrade to Pro for unlimited analyses + custom watchlist.\n"
+                "Use /subscribe to upgrade.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=_subscribe_keyboard(tier),
+            )
+            return
+
+    if not can_use_on_demand(tier) and tier != TIER_FREE:
         tier_cfg = get_tier_config(tier)
         await update.message.reply_text(
             f"⚠️ On-demand analysis is a *Pro* feature.\n\n"
@@ -376,10 +390,10 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     ticker = args[0].strip().upper()
-    await _run_and_send_analysis(update, ticker)
+    await _run_and_send_analysis(update, ticker, context)
 
 
-async def _run_and_send_analysis(update: Update, ticker: str) -> None:
+async def _run_and_send_analysis(update: Update, ticker: str, context: ContextTypes.DEFAULT_TYPE = None) -> None:
     """Run analysis and send result. Shared between command and callback."""
     await update.message.reply_text(
         f"🔍 Analyzing `{ticker}`...\n\n"
@@ -393,6 +407,12 @@ async def _run_and_send_analysis(update: Update, ticker: str) -> None:
             None, _run_single_stock_analysis, ticker, update.effective_user.id
         )
         await update.message.reply_text(result_text, parse_mode=ParseMode.MARKDOWN)
+        # Track free user daily usage
+        if context and update.effective_user:
+            db_user = db.get_user(update.effective_user.id)
+            if db_user and db_user["tier"] == TIER_FREE:
+                today_key = f"free_analyze_{update.effective_user.id}"
+                context.user_data[today_key] = context.user_data.get(today_key, 0) + 1
     except Exception as e:
         logger.error("On-demand analysis failed: ticker=%s error=%s", ticker, e)
         await update.message.reply_text(
@@ -413,16 +433,14 @@ async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     tier = db_user["tier"]
 
-    if not can_use_on_demand(tier):
-        await update.message.reply_text(
-            "⚠️ Decision Dashboard is a *Pro* feature.\n\n"
-            "Use /subscribe to view upgrade options.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
+    # Free users get dashboard for default stocks only
+    if tier == TIER_FREE:
+        tickers = _get_default_stock_list()
+        note = "_🆓 Free plan: showing default stocks. Upgrade to Pro for custom watchlist dashboard._"
+    else:
+        tickers = db_user.get("watchlist") or []
+        note = None
 
-    # Get watchlist
-    tickers = db_user.get("watchlist") or []
     if not tickers:
         await update.message.reply_text(
             "Your watchlist is empty. Use /add to add stocks first.",
@@ -688,20 +706,199 @@ def _run_single_stock_analysis(ticker: str, telegram_id: int) -> str:
         return _direct_llm_analysis(ticker)
 
 
+def _calculate_deterministic_score(price_data: dict) -> dict:
+    """
+    Calculate a deterministic decision score from price data.
+    Score is 0-100 based on RSI, MA alignment, MACD, price change, and volume.
+    Same input = same output every time.
+    """
+    score = 50  # neutral baseline
+
+    # Parse change %
+    change_pct = 0
+    change_str = price_data.get("Change", "")
+    if change_str:
+        try:
+            pct = change_str.split("(")[-1].replace("%)", "").replace("+", "")
+            change_pct = float(pct)
+        except (ValueError, IndexError):
+            pass
+
+    # Parse RSI
+    rsi = 50
+    rsi_str = price_data.get("RSI (14)", "")
+    if rsi_str:
+        try:
+            rsi = float(rsi_str.replace("~", ""))
+        except (ValueError, IndexError):
+            pass
+
+    # Parse MACD
+    macd = price_data.get("MACD Signal", "")
+    macd_bullish = "Bullish" in macd if macd else False
+    macd_bearish = "Bearish" in macd if macd else False
+
+    # Parse price vs 20DMA
+    price = None
+    dma20 = None
+    price_str = price_data.get("Price", "")
+    dma20_str = price_data.get("20DMA", "")
+    if price_str:
+        try:
+            price = float(price_str.split()[-1].replace(",", ""))
+        except (ValueError, IndexError):
+            pass
+    if dma20_str:
+        try:
+            dma20 = float(dma20_str.replace(",", ""))
+        except (ValueError, IndexError):
+            pass
+
+    # === SCORING COMPONENTS ===
+
+    # 1. Price Change (±15 points)
+    if change_pct > 3:
+        score += 15
+    elif change_pct > 1:
+        score += 10
+    elif change_pct > 0:
+        score += 5
+    elif change_pct < -3:
+        score -= 15
+    elif change_pct < -1:
+        score -= 10
+    elif change_pct < 0:
+        score -= 5
+
+    # 2. RSI (±15 points)
+    if rsi > 70:
+        score -= 10  # overbought = risk
+    elif rsi > 55:
+        score += 12  # bullish momentum
+    elif rsi > 45:
+        score += 0   # neutral
+    elif rsi > 30:
+        score -= 8   # weak
+    else:
+        score += 5   # oversold = potential bounce
+
+    # 3. MACD (±10 points)
+    if macd_bullish:
+        score += 10
+    elif macd_bearish:
+        score -= 10
+
+    # 4. Price vs 20DMA (±15 points)
+    if price is not None and dma20 is not None and dma20 > 0:
+        pct_from_dma = ((price - dma20) / dma20) * 100
+        if pct_from_dma > 5:
+            score += 15  # strong above MA
+        elif pct_from_dma > 2:
+            score += 10
+        elif pct_from_dma > 0:
+            score += 5
+        elif pct_from_dma > -2:
+            score -= 5
+        elif pct_from_dma > -5:
+            score -= 10
+        else:
+            score -= 15
+
+    # 5. Volume confirmation (±5 points)
+    vol_str = price_data.get("Volume Ratio", "")
+    if vol_str:
+        try:
+            vol_ratio = float(vol_str.replace("x average", "").strip())
+            if vol_ratio > 1.5:
+                score += 5  # high volume confirms move
+            elif vol_ratio > 1.0:
+                score += 2
+            elif vol_ratio < 0.5:
+                score -= 3  # low volume = weak conviction
+        except (ValueError, IndexError):
+            pass
+
+    # Clamp 0-100
+    score = max(0, min(100, score))
+
+    # === DETERMINE SIGNAL, ACTION, DIRECTION ===
+
+    if score >= 80:
+        signal = "Strong Bullish"
+        action = "Strong Buy"
+        direction = "LONG"
+        direction_color = "🔵"
+    elif score >= 65:
+        signal = "Bullish"
+        action = "Buy"
+        direction = "LONG"
+        direction_color = "🔵"
+    elif score >= 45:
+        signal = "Sideways"
+        action = "Hold"
+        direction = "NEUTRAL"
+        direction_color = "🟡"
+    elif score >= 25:
+        signal = "Bearish"
+        action = "Sell"
+        direction = "SHORT"
+        direction_color = "🔴"
+    else:
+        signal = "Strong Bearish"
+        action = "Strong Sell"
+        direction = "SHORT"
+        direction_color = "🔴"
+
+    # MA Alignment
+    ma_alignment = "Mixed ⚠️"
+    if price is not None and dma20 is not None:
+        if price > dma20:
+            ma_alignment = "Bullish ✅"
+        else:
+            ma_alignment = "Bearish ❌"
+
+    # Trend Strength (0-100)
+    trend_strength = 50
+    if price is not None and dma20 is not None and dma20 > 0:
+        pct = abs((price - dma20) / dma20) * 100
+        trend_strength = min(100, int(50 + pct * 5))
+    if macd_bullish:
+        trend_strength = min(100, trend_strength + 10)
+    elif macd_bearish:
+        trend_strength = max(0, trend_strength - 10)
+
+    return {
+        "score": score,
+        "signal": signal,
+        "action": action,
+        "direction": direction,
+        "direction_color": direction_color,
+        "ma_alignment": ma_alignment,
+        "trend_strength": trend_strength,
+        "rsi": rsi,
+        "change_pct": change_pct,
+        "macd_bullish": macd_bullish,
+        "price_above_dma20": price is not None and dma20 is not None and price > dma20,
+    }
+
+
 def _direct_llm_analysis(ticker: str) -> str:
     """
     Direct LLM analysis using OpenAI GPT-4o-mini.
-    Fetches comprehensive price + technical data, generates detailed analysis.
+    Score/Signal/Action/Direction are calculated deterministically from math.
+    LLM only writes the narrative — it cannot change the numbers.
     """
     import requests as http_requests
 
     # Step 1: Get comprehensive price data
     price_data = _fetch_comprehensive_data(ticker)
 
-    # Step 2: Get LLM API key (try env var, then multiple file paths)
+    # Step 1b: Calculate deterministic score from math (same input = same output)
+    ds = _calculate_deterministic_score(price_data)
+
+    # Step 2: Get LLM API key
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
-        # Try CWD-relative first (works in thread pool), then __file__-relative
         cwd = os.getcwd()
         key_paths = [
             os.path.join(cwd, "credentials", "openai.secret.json"),
@@ -720,9 +917,9 @@ def _direct_llm_analysis(ticker: str) -> str:
                 continue
 
     if not api_key:
-        return _format_price_only_report(ticker, price_data)
+        return _format_deterministic_report(ticker, price_data, ds)
 
-    # Build comprehensive prompt matching the original StockAnalyst format
+    # Build price context
     price_context = ""
     if price_data:
         price_lines = []
@@ -732,23 +929,43 @@ def _direct_llm_analysis(ticker: str) -> str:
         if price_lines:
             price_context = "\nCurrent market data:\n" + "\n".join(price_lines)
 
+    # Determine direction emoji
+    if ds["direction"] == "LONG":
+        dir_line = "🟢 Direction: LONG 📈"
+    elif ds["direction"] == "SHORT":
+        dir_line = "🔴 Direction: SHORT 📉"
+    else:
+        dir_line = "🟡 Direction: NEUTRAL ➡️"
+
+    # Determine signal/action emoji
+    sig_emoji = "🔵" if "Bullish" in ds["signal"] else ("🔴" if "Bearish" in ds["signal"] else "🟡")
+    act_emoji = "🔵" if "Buy" in ds["action"] else ("🔴" if "Sell" in ds["action"] else "🟡")
+
     prompt = (
-        f"You are StockAnalyst AI, an expert financial analyst producing institutional-grade analysis. "
-        f"Analyze {ticker} using the data below. Produce a COMPLETE analysis in this EXACT format:\n"
+        f"You are StockAnalyst AI. Analyze {ticker} using the data below. "
+        f"IMPORTANT: The score, signal, action, and direction are PRE-CALCULATED and FIXED. "
+        f"You MUST use these exact values — do NOT change them. Your job is to write the narrative sections.\n"
         f"{price_context}\n\n"
-        f"FORMAT (follow this structure exactly):\n\n"
-        f"📊 *{ticker} — Decision Score: [0-100]*\n\n"
-        f"*Signal:* Always prefix with colored emoji. Use 🔴 for bearish, 🔵 for bullish, 🟡 for sideways.\n"
-        f"Examples: 🔴 *Bearish* | 🔵 *Bullish* | 🟡 *Sideways*\n"
-        f"*Action:* Always prefix with colored emoji. Use 🔴 for sell, 🔵 for buy, 🟡 for hold.\n"
-        f"Examples: 🔴 *Sell* | 🔵 *Buy* | 🟡 *Hold*\n\n"
+        f"PRE-CALCULATED VALUES (use exactly, do not change):\n"
+        f"- Decision Score: {ds['score']}/100\n"
+        f"- Signal: {sig_emoji} {ds['signal']}\n"
+        f"- Action: {act_emoji} {ds['action']}\n"
+        f"- Direction: {dir_line}\n"
+        f"- MA Alignment: {ds['ma_alignment']} | Trend Strength: {ds['trend_strength']}/100\n"
+        f"- RSI: {ds['rsi']:.1f}\n"
+        f"- Price Change: {ds['change_pct']:+.1f}%\n"
+        f"- Price above 20DMA: {'Yes' if ds['price_above_dma20'] else 'No'}\n\n"
+        f"Produce the COMPLETE analysis in this EXACT format:\n\n"
+        f"📊 *{ticker} — Decision Score: {ds['score']}*\n\n"
+        f"*Signal:* {sig_emoji} *{ds['signal']}*\n"
+        f"*Action:* {act_emoji} *{ds['action']}*\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"*Key Updates*\n"
-        f"• Sentiment: [1-2 sentences on market mood]\n"
+        f"• Sentiment: [1-2 sentences based on the data]\n"
         f"• Risk Alerts: [2 specific risks]\n"
         f"• Positive Catalyst: [1-2 catalysts]\n\n"
         f"*Core Decision*\n"
-        f"• Recommendation: [Buy/Watch/Sell] | Confidence: [1-2 word]\n"
+        f"• Recommendation: {ds['action']} | Confidence: [based on score strength]\n"
         f"• One-line Decision: [1 decisive sentence]\n"
         f"• Time Sensitivity: [Today / This Week / This Month]\n\n"
         f"*Position | Action*\n"
@@ -756,34 +973,31 @@ def _direct_llm_analysis(ticker: str) -> str:
         f"• Holding: [hold/sell guidance]\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"*Market Snapshot*\n"
-        f"• Price: [current] | Change: [+/- $ and %] | Volume: [ratio]x avg\n"
-        f"• MA5: [value] | MA10: [value] | MA20: [value]\n"
-        f"• MA Alignment: [Bullish ✅ | Bearish ❌ | Mixed ⚠️] | Trend Strength: [0-100]\n"
-        f"• Bias from MA20: [percentage]\n\n"
+        f"• Price: [from data] | Change: [from data] | Volume: [from data]\n"
+        f"• MA Alignment: {ds['ma_alignment']} | Trend Strength: {ds['trend_strength']}/100\n"
+        f"• Bias from MA20: [calculate from data]\n\n"
         f"*Key Levels*\n"
-        f"🟢 Support: [3 specific price levels]\n"
-        f"🔴 Resistance: [3 specific price levels]\n\n"
+        f"🟢 Support: [3 specific price levels from data]\n"
+        f"🔴 Resistance: [3 specific price levels from data]\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"*⚔️ Battle Plan*\n"
-        f"IMPORTANT: Show ONLY ONE direction line. If bullish use: 🟢 Direction: LONG 📈\n"
-        f"If bearish use: 🔴 Direction: SHORT 📉\n"
-        f"Never show both. Pick the correct one based on the data.\n"
+        f"{dir_line}\n"
         f"🎯 Ideal Entry: [specific price]\n"
         f"🎯 Secondary Entry: [specific price]\n"
         f"🛑 Stop Loss: [specific price]\n"
         f"🏆 TP1 (Conservative): [specific price]\n"
         f"🏆 TP2 (Aggressive): [specific price]\n"
-        f"📊 Risk/Reward: [ratio like 1:3]\n"
-        f"📐 Position Size: [X/10]\n\n"
+        f"📊 Risk/Reward: [ratio]\n"
+        f"📐 Position Size: [1-10 based on score confidence]\n\n"
         f"*✅ Checklist*\n"
-        f"1. MA Alignment (MA5 > MA10 > MA20): [Pass ✅ / Fail ❌]\n"
-        f"2. Support reasonable (1-5% from price): [Pass / Fail]\n"
+        f"1. MA Alignment: {'Pass ✅' if 'Bullish' in ds['ma_alignment'] else 'Fail ❌'}\n"
+        f"2. Support reasonable (1-5%): [Pass / Fail]\n"
         f"3. Volume confirmation: [Pass / Fail]\n"
         f"4. No major negative catalysts: [Pass / Fail]\n"
         f"5. RSI not extreme (20-80): [Pass / Fail]\n"
         f"6. Trend direction clear: [Pass / Fail]\n\n"
-        f"Be SPECIFIC with dollar amounts. Use the data provided to calculate real levels. "
-        f"If data is insufficient, say so. Use Markdown formatting. Keep under 700 words."
+        f"Be SPECIFIC with dollar amounts. Use the data to calculate real levels. "
+        f"Keep under 700 words. Use Markdown."
     )
 
     try:
@@ -797,7 +1011,7 @@ def _direct_llm_analysis(ticker: str) -> str:
                 "model": "gpt-4o-mini",
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 1500,
-                "temperature": 0.5,
+                "temperature": 0.3,
             },
             timeout=45,
         )
@@ -805,13 +1019,23 @@ def _direct_llm_analysis(ticker: str) -> str:
         if resp.status_code == 200:
             data = resp.json()
             analysis = data["choices"][0]["message"]["content"]
+            # Force the score header to be deterministic (LLM might hallucinate a different one)
+            expected_header = f"📊 *{ticker} — Decision Score: {ds['score']}*"
+            if expected_header not in analysis:
+                # Replace whatever header the LLM put with the correct one
+                import re
+                analysis = re.sub(
+                    r"📊 \*.*?— Decision Score:.*?\*",
+                    expected_header,
+                    analysis
+                )
             return analysis
         else:
             logger.error("OpenAI API error: %d %s", resp.status_code, resp.text[:200])
-            return _format_price_only_report(ticker, price_data)
+            return _format_deterministic_report(ticker, price_data, ds)
     except Exception as e:
         logger.error("Direct LLM analysis failed: %s", e)
-        return _format_price_only_report(ticker, price_data)
+        return _format_deterministic_report(ticker, price_data, ds)
 
 
 def _fetch_comprehensive_data(ticker: str) -> dict:
@@ -909,8 +1133,50 @@ def _fetch_comprehensive_data(ticker: str) -> dict:
     return data
 
 
+def _format_deterministic_report(ticker: str, price_data: dict, ds: dict) -> str:
+    """Full deterministic report when no LLM is available — score from math, not guessing"""
+
+    # Determine direction line
+    if ds["direction"] == "LONG":
+        dir_line = "🟢 Direction: LONG 📈"
+    elif ds["direction"] == "SHORT":
+        dir_line = "🔴 Direction: SHORT 📉"
+    else:
+        dir_line = "🟡 Direction: NEUTRAL ➡️"
+
+    sig_emoji = "🔵" if "Bullish" in ds["signal"] else ("🔴" if "Bearish" in ds["signal"] else "🟡")
+    act_emoji = "🔵" if "Buy" in ds["action"] else ("🔴" if "Sell" in ds["action"] else "🟡")
+
+    lines = [
+        f"📊 *{ticker} — Decision Score: {ds['score']}*",
+        f"",
+        f"*Signal:* {sig_emoji} *{ds['signal']}*",
+        f"*Action:* {act_emoji} *{ds['action']}*",
+        f"",
+        f"━━━━━━━━━━━━━━━━━━━━",
+        f"",
+        f"*Market Snapshot*",
+    ]
+
+    for key, value in price_data.items():
+        if value is not None and value != "":
+            lines.append(f"• {key}: {value}")
+
+    lines.extend([
+        f"",
+        f"• MA Alignment: {ds['ma_alignment']} | Trend Strength: {ds['trend_strength']}/100",
+        f"",
+        f"*⚔️ Battle Plan*",
+        dir_line,
+        f"",
+        f"_Full narrative analysis requires Pro API key._",
+    ])
+
+    return "\n".join(lines)
+
+
 def _format_price_only_report(ticker: str, price_data: dict) -> str:
-    """Fallback report when no LLM is available"""
+    """Legacy fallback — no score data available"""
     if price_data:
         lines = [f"📊 *{ticker} Market Data*\n"]
         for key, value in price_data.items():
@@ -923,152 +1189,56 @@ def _format_price_only_report(ticker: str, price_data: dict) -> str:
 def _generate_dashboard(tickers: list[str], telegram_id: int) -> str:
     """
     Generate a Decision Dashboard for all watchlist stocks.
-    Fetches price data for each, uses LLM to score, categorizes into Buy/Watch/Sell.
+    Uses deterministic scoring from math — same data = same scores every time.
     """
-    import requests as http_requests
-
-    # Get API key
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        cwd = os.getcwd()
-        key_paths = [
-            os.path.join(cwd, "credentials", "openai.secret.json"),
-            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "credentials", "openai.secret.json"),
-            "./credentials/openai.secret.json",
-        ]
-        for path in key_paths:
-            try:
-                if os.path.exists(path):
-                    with open(path) as f:
-                        data = json.load(f)
-                    api_key = data.get("key", data.get("api_key", ""))
-                    if api_key:
-                        break
-            except Exception:
-                continue
-
-    # Fetch price data for all tickers
-    all_price_data = {}
-    for ticker in tickers[:15]:  # max 15 stocks
-        all_price_data[ticker] = _fetch_comprehensive_data(ticker)
-
-    # Build price summary for LLM
-    price_summary_lines = []
-    for ticker, pdata in all_price_data.items():
-        if pdata:
-            line = f"{ticker}: " + ", ".join(f"{k}={v}" for k, v in pdata.items() if v)
-        else:
-            line = f"{ticker}: No data available"
-        price_summary_lines.append(line)
-    price_summary = "\n".join(price_summary_lines)
-
-    if not api_key:
-        # No LLM - generate simple dashboard from price data only
-        return _generate_simple_dashboard(tickers, all_price_data)
-
-    # Ask LLM to score each stock and categorize
-    prompt = (
-        f"You are StockAnalyst AI. Score each stock below on a 0-100 scale based on the market data provided. "
-        f"Categorize each as Buy (score 70+), Watch (score 35-69), or Sell (score below 35). "
-        f"Also assign a signal: Strong Bullish, Bullish, Sideways, Bearish, or Strong Bearish.\n\n"
-        f"Market data:\n{price_summary}\n\n"
-        f"Respond in this EXACT format, one stock per line:\n"
-        f"TICKER | Score | Signal | Action\n"
-        f"Example: NVDA | 85 | Strong Bullish | Buy\n\n"
-        f"List ALL {len(tickers)} stocks. No extra text."
-    )
-
-    try:
-        resp = http_requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 600,
-                "temperature": 0.3,
-            },
-            timeout=45,
-        )
-
-        if resp.status_code != 200:
-            logger.error("Dashboard LLM error: %d", resp.status_code)
-            return _generate_simple_dashboard(tickers, all_price_data)
-
-        data = resp.json()
-        llm_output = data["choices"][0]["message"]["content"]
-        return _format_dashboard(tickers, llm_output)
-
-    except Exception as e:
-        logger.error("Dashboard generation failed: %s", e)
-        return _generate_simple_dashboard(tickers, all_price_data)
-
-
-def _format_dashboard(tickers: list[str], llm_output: str) -> str:
-    """Parse LLM output and format as Decision Dashboard"""
-    # Parse LLM output into structured data
-    stocks = {"buy": [], "watch": [], "sell": []}
-
-    for line in llm_output.strip().split("\n"):
-        line = line.strip()
-        if "|" not in line:
-            continue
-        parts = [p.strip() for p in line.split("|")]
-        if len(parts) < 3:
-            continue
-
-        ticker = parts[0].strip().replace("*", "")
-        try:
-            score = int("".join(c for c in parts[1] if c.isdigit()))
-        except (ValueError, IndexError):
-            score = 50
-        signal = parts[2].strip() if len(parts) > 2 else "Sideways"
-        action = parts[3].strip() if len(parts) > 3 else "Watch"
-
-        entry = {"ticker": ticker, "score": score, "signal": signal, "action": action}
-
-        action_lower = action.lower()
-        if "buy" in action_lower or "strong buy" in action_lower:
-            stocks["buy"].append(entry)
-        elif "sell" in action_lower or "strong sell" in action_lower:
-            stocks["sell"].append(entry)
-        else:
-            stocks["watch"].append(entry)
-
-    # Sort each category by score descending
-    for key in stocks:
-        stocks[key].sort(key=lambda x: x["score"], reverse=True)
-
-    # Build dashboard
-    total = sum(len(v) for v in stocks.values())
     from datetime import datetime, timezone as tz
+
+    # Fetch price data and calculate scores for all tickers
+    stock_entries = []
+    for ticker in tickers[:15]:  # max 15 stocks
+        price_data = _fetch_comprehensive_data(ticker)
+        ds = _calculate_deterministic_score(price_data)
+        stock_entries.append({
+            "ticker": ticker,
+            "score": ds["score"],
+            "signal": ds["signal"],
+            "action": ds["action"],
+        })
+
+    # Categorize
+    buy = [s for s in stock_entries if "Buy" in s["action"]]
+    watch = [s for s in stock_entries if "Hold" in s["action"] or "Watch" in s["action"]]
+    sell = [s for s in stock_entries if "Sell" in s["action"]]
+
+    # Sort each by score descending
+    buy.sort(key=lambda x: x["score"], reverse=True)
+    watch.sort(key=lambda x: x["score"], reverse=True)
+    sell.sort(key=lambda x: x["score"], reverse=True)
+
     date_str = datetime.now(tz(timedelta(hours=10))).strftime("%Y-%m-%d")
 
     lines = [
         f"📊 *Decision Dashboard* — {date_str}",
         f"",
-        f"Analyzed {total} stocks | Buy: {len(stocks['buy'])} | Watch: {len(stocks['watch'])} | Sell: {len(stocks['sell'])}",
+        f"Analyzed {len(stock_entries)} stocks | Buy: {len(buy)} | Watch: {len(watch)} | Sell: {len(sell)}",
         f"",
     ]
 
-    if stocks["buy"]:
+    if buy:
         lines.append("*🟢 Buy*")
-        for s in stocks["buy"]:
+        for s in buy:
             lines.append(f"  • `{s['ticker']}` — Score {s['score']} | {s['signal']}")
         lines.append("")
 
-    if stocks["watch"]:
+    if watch:
         lines.append("*🟡 Watch*")
-        for s in stocks["watch"]:
+        for s in watch:
             lines.append(f"  • `{s['ticker']}` — Score {s['score']} | {s['signal']}")
         lines.append("")
 
-    if stocks["sell"]:
+    if sell:
         lines.append("*🔴 Sell*")
-        for s in stocks["sell"]:
+        for s in sell:
             lines.append(f"  • `{s['ticker']}` — Score {s['score']} | {s['signal']}")
         lines.append("")
 
@@ -1076,118 +1246,6 @@ def _format_dashboard(tickers: list[str], llm_output: str) -> str:
 
     return "\n".join(lines)
 
-
-def _generate_simple_dashboard(tickers: list[str], all_price_data: dict) -> str:
-    """Fallback dashboard without LLM - uses price data + RSI only"""
-    from datetime import datetime, timezone as tz
-    from datetime import timedelta
-    date_str = datetime.now(tz(timedelta(hours=10))).strftime("%Y-%m-%d")
-
-    stocks = {"buy": [], "watch": [], "sell": []}
-
-    for ticker in tickers:
-        pdata = all_price_data.get(ticker, {})
-        score = 50  # default
-        signal = "Sideways"
-
-        # Simple scoring based on available data
-        change_str = pdata.get("Change", "")
-        rsi_str = pdata.get("RSI (14)", "")
-        macd = pdata.get("MACD Signal", "")
-
-        # Parse change %
-        change_pct = 0
-        if change_str:
-            try:
-                pct = change_str.split("(")[-1].replace("%)", "").replace("+", "").replace("%", "")
-                change_pct = float(pct)
-            except (ValueError, IndexError):
-                pass
-
-        # Parse RSI
-        rsi = 50
-        if rsi_str:
-            try:
-                rsi = float(rsi_str.replace("~", ""))
-            except (ValueError, IndexError):
-                pass
-
-        # Score calculation
-        score = 50
-        if change_pct > 2:
-            score += 20
-        elif change_pct > 0:
-            score += 10
-        elif change_pct < -2:
-            score -= 20
-        elif change_pct < 0:
-            score -= 10
-
-        if rsi > 60:
-            score += 10
-        elif rsi < 40:
-            score -= 10
-
-        if "Bullish" in macd:
-            score += 10
-        elif "Bearish" in macd:
-            score -= 10
-
-        score = max(0, min(100, score))
-
-        # Signal
-        if score >= 70:
-            signal = "Strong Bullish" if score >= 80 else "Bullish"
-        elif score >= 40:
-            signal = "Sideways"
-        else:
-            signal = "Strong Bearish" if score < 25 else "Bearish"
-
-        # Action
-        if score >= 70:
-            action = "Buy"
-        elif score >= 35:
-            action = "Watch"
-        else:
-            action = "Sell"
-
-        entry = {"ticker": ticker, "score": score, "signal": signal, "action": action}
-        stocks[action.lower()].append(entry)
-
-    # Sort
-    for key in stocks:
-        stocks[key].sort(key=lambda x: x["score"], reverse=True)
-
-    total = sum(len(v) for v in stocks.values())
-
-    lines = [
-        f"📊 *Decision Dashboard* — {date_str}",
-        f"",
-        f"Analyzed {total} stocks | Buy: {len(stocks['buy'])} | Watch: {len(stocks['watch'])} | Sell: {len(stocks['sell'])}",
-        f"",
-    ]
-
-    if stocks["buy"]:
-        lines.append("*🟢 Buy*")
-        for s in stocks["buy"]:
-            lines.append(f"  • `{s['ticker']}` — Score {s['score']} | {s['signal']}")
-        lines.append("")
-
-    if stocks["watch"]:
-        lines.append("*🟡 Watch*")
-        for s in stocks["watch"]:
-            lines.append(f"  • `{s['ticker']}` — Score {s['score']} | {s['signal']}")
-        lines.append("")
-
-    if stocks["sell"]:
-        lines.append("*🔴 Sell*")
-        for s in stocks["sell"]:
-            lines.append(f"  • `{s['ticker']}` — Score {s['score']} | {s['signal']}")
-        lines.append("")
-
-    lines.append("_Use /analyze TICKER for full Battle Plan._")
-
-    return "\n".join(lines)
 
 
 # ===========================

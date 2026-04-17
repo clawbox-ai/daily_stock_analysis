@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-套餐等级定义与校验
+Tier definitions and validation
 
-职责：
-1. 定义 Free / Pro 两档套餐的权限与限制
-2. 提供统一的套餐校验辅助函数
+Responsibilities:
+1. Define Free / Pro tier permissions and limits
+2. Provide unified tier validation helper functions
 """
 from dataclasses import dataclass, field
 from typing import Optional
 
 
 # ===========================
-# 套餐等级常量
+# Tier Constants
 # ===========================
 
 TIER_FREE = "free"
@@ -22,101 +22,101 @@ ALL_TIERS = (TIER_FREE, TIER_PRO)
 
 @dataclass
 class TierConfig:
-    """单档套餐配置"""
-    name: str                        # 套餐标识符
-    label: str                       # 显示名称
-    price_monthly: float             # 月费（USD）
-    max_watchlist: Optional[int]     # 自选股上限；None 表示无限制
-    on_demand_analysis: bool         # 是否支持 /analyze 按需分析
-    daily_broadcast: bool            # 是否接收每日广播
-    market_review: bool              # 是否接收大盘复盘
-    priority_analysis: bool          # 是否优先处理分析任务
-    description: str = ""            # 套餐简介（展示给用户）
+    """Single tier configuration"""
+    name: str                        # Tier identifier
+    label: str                       # Display name
+    price_monthly: float             # Monthly price (USD)
+    max_watchlist: Optional[int]     # Max watchlist stocks; None = unlimited
+    on_demand_analysis: bool         # Whether /analyze on-demand is supported
+    daily_broadcast: bool           # Whether daily broadcast is received
+    market_review: bool              # Whether market review is received
+    priority_analysis: bool          # Whether priority analysis is enabled
+    description: str = ""            # Tier description (shown to users)
 
 
 # ===========================
-# 套餐定义
+# Tier Definitions
 # ===========================
 
 TIER_CONFIGS: dict[str, TierConfig] = {
     TIER_FREE: TierConfig(
         name=TIER_FREE,
-        label="免费版 Free",
+        label="Free",
         price_monthly=0.0,
-        max_watchlist=None,           # 免费用户使用系统默认股票列表，不支持自定义
+        max_watchlist=None,           # Free users use default stock list, no custom watchlist
         on_demand_analysis=False,
         daily_broadcast=True,
         market_review=False,
         priority_analysis=False,
-        description="每日接收系统默认股票的分析广播，无需配置。",
+        description="Receive daily analysis broadcasts for default stocks. No configuration needed.",
     ),
     TIER_PRO: TierConfig(
         name=TIER_PRO,
-        label="专业版 Pro",
+        label="Pro",
         price_monthly=9.0,
-        max_watchlist=None,           # unlimited
+        max_watchlist=None,           # Unlimited
         on_demand_analysis=True,
         daily_broadcast=True,
         market_review=True,
         priority_analysis=True,
-        description="无限自选股、按需分析、每日大盘复盘、优先处理，全功能解锁。",
+        description="Unlimited watchlist, on-demand analysis, daily market review, priority processing. Full access.",
     ),
 }
 
 
 def get_tier_config(tier: str) -> TierConfig:
-    """获取套餐配置；未知等级降级到 Free"""
+    """Get tier config; unknown tier falls back to Free"""
     return TIER_CONFIGS.get(tier, TIER_CONFIGS[TIER_FREE])
 
 
 def can_use_on_demand(tier: str) -> bool:
-    """是否可以使用 /analyze 按需分析"""
+    """Whether /analyze on-demand analysis is available"""
     return get_tier_config(tier).on_demand_analysis
 
 
 def can_customize_watchlist(tier: str) -> bool:
-    """是否可以自定义自选股列表"""
+    """Whether custom watchlist is available"""
     cfg = get_tier_config(tier)
     return cfg.max_watchlist is not None or cfg.name == TIER_PRO
 
 
 def watchlist_limit(tier: str) -> Optional[int]:
-    """自选股数量上限；None 表示无限"""
+    """Watchlist stock limit; None = unlimited"""
     return get_tier_config(tier).max_watchlist
 
 
 def can_receive_market_review(tier: str) -> bool:
-    """是否接收大盘复盘报告"""
+    """Whether market review reports are received"""
     return get_tier_config(tier).market_review
 
 
 def is_valid_tier(tier: str) -> bool:
-    """校验套餐标识符是否合法"""
+    """Validate tier identifier"""
     return tier in ALL_TIERS
 
 
 def format_tier_menu() -> str:
-    """生成套餐选择菜单文本（用于 /subscribe 回复）"""
-    lines = ["📋 *套餐说明*\n"]
+    """Generate tier selection menu text (for /subscribe reply)"""
+    lines = ["📋 *Subscription Plans*\n"]
     for tier_key in ALL_TIERS:
         cfg = TIER_CONFIGS[tier_key]
-        price = "免费" if cfg.price_monthly == 0 else f"${cfg.price_monthly:.0f}/月"
-        watchlist = "系统默认" if tier_key == TIER_FREE else "无限制"
+        price = "Free" if cfg.price_monthly == 0 else f"${cfg.price_monthly:.0f}/mo"
+        watchlist = "Default stocks" if tier_key == TIER_FREE else "Unlimited"
         features = []
         if cfg.daily_broadcast:
-            features.append("每日广播")
+            features.append("Daily Broadcast")
         if cfg.on_demand_analysis:
-            features.append("按需分析")
+            features.append("On-Demand Analysis")
         if cfg.market_review:
-            features.append("大盘复盘")
+            features.append("Market Review")
         if cfg.priority_analysis:
-            features.append("优先处理")
+            features.append("Priority Processing")
 
         lines.append(
             f"*{cfg.label}* — {price}\n"
-            f"  • 自选股：{watchlist}\n"
-            f"  • 功能：{' / '.join(features)}\n"
+            f"  • Watchlist: {watchlist}\n"
+            f"  • Features: {' / '.join(features)}\n"
             f"  • {cfg.description}\n"
         )
-    lines.append("_如需升级，请联系管理员获取支付链接。_")
+    lines.append("_To upgrade, contact admin for a payment link._")
     return "\n".join(lines)

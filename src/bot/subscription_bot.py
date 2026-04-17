@@ -340,7 +340,7 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/email <address> — Set email for Pro daily analysis delivery"""
+    """/email — Set up email delivery for Pro daily analysis (one email per day)"""
     user = update.effective_user
     if user is None:
         return
@@ -362,50 +362,153 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     args = context.args
+
+    # No args: show current settings or setup guide
     if not args:
-        current_email = db.get_email(user.id)
-        if current_email:
+        schedule = db.get_email_schedule(user.id)
+        if schedule["email"]:
+            from src.bot.city_timezones import resolve_timezone, get_utc_offset_display
+            tz_display = get_utc_offset_display(schedule["timezone"]) if schedule["timezone"] else "Not set"
+            city = schedule["timezone"] or "Not set"
             await update.message.reply_text(
                 f"📧 *Email Delivery*\n\n"
-                f"Current email: `{current_email}`\n\n"
-                f"Your full watchlist analysis is delivered daily to this address.\n\n"
-                f"To change: `/email new@example.com`\n"
-                f"To remove: `/email off`",
+                f"• Email: `{schedule['email']}`\n"
+                f"• City/Timezone: {city} ({tz_display})\n"
+                f"• Delivery time: {schedule['delivery_time']} local time\n"
+                f"• Frequency: Once daily\n\n"
+                f"*Change settings:*\n"
+                f"• `/email your@email.com` — Change email\n"
+                f"• `/email city Brisbane` — Change city\n"
+                f"• `/email time 07:30` — Change delivery time\n"
+                f"• `/email off` — Turn off email delivery",
                 parse_mode=ParseMode.MARKDOWN,
             )
         else:
             await update.message.reply_text(
-                "📧 *Email Delivery*\n\n"
-                "No email set. Add one to receive your daily watchlist analysis:\n\n"
-                "`/email your@email.com`",
+                "📧 *Email Delivery Setup*\n\n"
+                "Get your full watchlist analysis delivered by email once daily.\n\n"
+                "*3 simple steps:*\n"
+                "1️⃣ `/email your@email.com` — Set your email\n"
+                "2️⃣ `/email city Brisbane` — Set your city\n"
+                "3️⃣ `/email time 08:00` — Set delivery time (optional, default 08:00)\n\n"
+                "_Just type your city name — we handle the timezone math!_",
                 parse_mode=ParseMode.MARKDOWN,
             )
         return
 
-    email_input = args[0].strip().lower()
+    action = args[0].strip().lower()
 
-    if email_input in ("off", "remove", "delete", "none"):
-        db.set_email(user.id, None)
+    # Turn off
+    if action in ("off", "remove", "delete", "none"):
+        db.set_email_schedule(user.id, None, None, "08:00")
         await update.message.reply_text(
-            "📧 Email delivery turned off. You'll still receive Telegram broadcasts.",
+            "📧 Email delivery turned off. You'll still get Telegram broadcasts.",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
 
-    # Basic email validation
-    if "@" not in email_input or "." not in email_input.split("@")[-1]:
+    # Set city/timezone
+    if action == "city" and len(args) > 1:
+        from src.bot.city_timezones import resolve_timezone, get_utc_offset_display
+        city_input = " ".join(args[1:]).strip()
+        timezone = resolve_timezone(city_input)
+        if not timezone:
+            from src.bot.city_timezones import get_popular_cities
+            popular = get_popular_cities()
+            city_list = " | ".join(popular[:15])
+            await update.message.reply_text(
+                f"❌ Couldn't find timezone for *{city_input}*.\n\n"
+                f"Try one of these cities:\n{city_list}\n\n"
+                f"Or use a timezone directly: `/email city Australia/Brisbane`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        schedule = db.get_email_schedule(user.id)
+        if not schedule["email"]:
+            await update.message.reply_text(
+                "⚠️ Set your email first: `/email your@email.com`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        db.set_email_schedule(user.id, schedule["email"], timezone, schedule["delivery_time"])
+        offset = get_utc_offset_display(timezone)
         await update.message.reply_text(
-            "❌ That doesn't look like a valid email. Example: `/email john@gmail.com`",
+            f"✅ City set to *{city_input}* ({offset})\n\n"
+            f"📧 Delivery at {schedule['delivery_time']} your local time.\n"
+            f"Change time: `/email time 07:30`",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
 
-    db.set_email(user.id, email_input)
+    # Set delivery time
+    if action == "time" and len(args) > 1:
+        time_input = args[1].strip()
+        # Validate HH:MM format
+        import re
+        if not re.match(r"^\d{1,2}:\d{2}$", time_input):
+            await update.message.reply_text(
+                "❌ Use 24-hour format: `/email time 08:00` or `/email time 17:30`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        hour, minute = time_input.split(":")
+        if not (0 <= int(hour) <= 23 and 0 <= int(minute) <= 59):
+            await update.message.reply_text(
+                "❌ Invalid time. Use 24-hour format: `/email time 08:00`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        schedule = db.get_email_schedule(user.id)
+        if not schedule["email"]:
+            await update.message.reply_text(
+                "⚠️ Set your email first: `/email your@email.com`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        db.set_email_schedule(user.id, schedule["email"], schedule["timezone"], time_input)
+        tz_display = schedule["timezone"] or "UTC"
+        await update.message.reply_text(
+            f"✅ Delivery time set to *{time_input}* ({tz_display})\n\n"
+            f"📧 Your full analysis will arrive at {time_input} your local time.\n"
+            f"Change city: `/email city Sydney`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    # Set email address
+    if "@" in action and "." in action.split("@")[-1]:
+        schedule = db.get_email_schedule(user.id)
+        db.set_email_schedule(user.id, action, schedule["timezone"], schedule["delivery_time"])
+        if schedule["timezone"]:
+            await update.message.reply_text(
+                f"✅ Email set to `{action}`\n\n"
+                f"📧 Delivery at {schedule['delivery_time']} your local time.\n"
+                f"Change city: `/email city London`\n"
+                f"Change time: `/email time 09:00`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        else:
+            await update.message.reply_text(
+                f"✅ Email set to `{action}`\n\n"
+                f"📍 Next step: Set your city for delivery time\n"
+                f"Example: `/email city Tokyo` or `/email city New York`\n\n"
+                f"_We calculate the timezone from your city — no UTC math needed!_",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        return
+
+    # Unknown input
     await update.message.reply_text(
-        f"✅ Email set to `{email_input}`\n\n"
-        f"📧 Your full watchlist analysis will be delivered to this address daily.\n"
-        f"Change anytime with `/email new@example.com`\n"
-        f"Turn off with `/email off`",
+        "📧 *Email Delivery Commands*\n\n"
+        "• `/email your@email.com` — Set email\n"
+        "• `/email city Brisbane` — Set your city\n"
+        "• `/email time 08:00` — Set delivery time\n"
+        "• `/email off` — Turn off delivery\n"
+        "• `/email` — View current settings",
         parse_mode=ParseMode.MARKDOWN,
     )
 

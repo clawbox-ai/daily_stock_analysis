@@ -77,12 +77,22 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_payments_telegram_id
                 ON payments(telegram_id);
         """)
-    # Migration: add email column if missing
+    # Migration: add email/timezone columns if missing
     try:
         with _get_conn() as conn:
             conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
     except Exception:
-        pass  # Column already exists
+        pass
+    try:
+        with _get_conn() as conn:
+            conn.execute("ALTER TABLE users ADD COLUMN timezone TEXT")
+    except Exception:
+        pass
+    try:
+        with _get_conn() as conn:
+            conn.execute("ALTER TABLE users ADD COLUMN delivery_time TEXT NOT NULL DEFAULT '08:00'")
+    except Exception:
+        pass
     logger.info("Database initialized: %s", _get_db_path())
 
 
@@ -227,6 +237,28 @@ def set_email(telegram_id: int, email: str) -> bool:
             (email, telegram_id),
         )
     return cursor.rowcount > 0
+
+
+def set_email_schedule(telegram_id: int, email: str, timezone: str, delivery_time: str) -> bool:
+    """Set email, timezone, and delivery time for Pro email delivery"""
+    with _get_conn() as conn:
+        cursor = conn.execute(
+            "UPDATE users SET email = ?, timezone = ?, delivery_time = ? WHERE telegram_id = ?",
+            (email, timezone, delivery_time, telegram_id),
+        )
+    return cursor.rowcount > 0
+
+
+def get_email_schedule(telegram_id: int) -> dict:
+    """Get user's email delivery settings"""
+    user = get_user(telegram_id)
+    if not user:
+        return {"email": None, "timezone": None, "delivery_time": "08:00"}
+    return {
+        "email": user.get("email"),
+        "timezone": user.get("timezone"),
+        "delivery_time": user.get("delivery_time", "08:00"),
+    }
 
 
 # ===========================

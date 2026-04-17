@@ -93,7 +93,8 @@ def _main_menu_keyboard(tier: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📊 Dashboard", callback_data="cmd_dashboard"),
         ])
     keyboard.append([
-        InlineKeyboardButton("💎 Upgrade to Pro", callback_data="cmd_subscribe") if tier == TIER_FREE else InlineKeyboardButton("📖 Help", callback_data="cmd_help"),
+        InlineKeyboardButton("📧 Email", callback_data="cmd_email_menu"),
+        InlineKeyboardButton("💎 Upgrade" if tier == TIER_FREE else "📖 Help", callback_data="cmd_subscribe" if tier == TIER_FREE else "cmd_help"),
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -803,6 +804,58 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "Select a stock to analyze:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+
+    elif data == "cmd_email_menu":
+        db_user = db.get_user(user.id) or db.create_user(telegram_id=user.id, username=user.username)
+        if db_user["tier"] == TIER_FREE:
+            await query.edit_message_text(
+                "📧 *Email Delivery*\n\n"
+                "⚠️ This feature is for *Pro* members only.\n\n"
+                "💎 Upgrade to Pro for:\n"
+                "• Daily email with full watchlist analysis\n"
+                "• Custom delivery time\n"
+                "• City-based timezone — no UTC math\n\n"
+                "Use /subscribe to upgrade!",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        # Pro user — show email submenu
+        schedule = db.get_email_schedule(user.id)
+        if schedule["email"]:
+            from src.bot.city_timezones import get_utc_offset_display
+            tz_display = get_utc_offset_display(schedule["timezone"]) if schedule["timezone"] else "Not set"
+            city = schedule["timezone"] or "Not set"
+            keyboard = [
+                [InlineKeyboardButton("📧 Change Email", callback_data="email_set_prompt")],
+                [InlineKeyboardButton("📍 Change City", callback_data="email_city_prompt")],
+                [InlineKeyboardButton("🕐 Change Time", callback_data="email_time_prompt")],
+                [InlineKeyboardButton("🔴 Turn Off Email", callback_data="email_off")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="cmd_start")],
+            ]
+            await query.edit_message_text(
+                f"📧 *Email Delivery*\n\n"
+                f"• Email: `{schedule['email']}`\n"
+                f"• City: {city} ({tz_display})\n"
+                f"• Delivery: {schedule['delivery_time']} local time\n"
+                f"• Frequency: Once daily\n\n"
+                f"_Email delivery coming soon — settings saved!_",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        else:
+            keyboard = [
+                [InlineKeyboardButton("📧 Set Email", callback_data="email_set_prompt")],
+                [InlineKeyboardButton("📍 Set City", callback_data="email_city_prompt")],
+                [InlineKeyboardButton("🕐 Set Time", callback_data="email_time_prompt")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="cmd_start")],
+            ]
+            await query.edit_message_text(
+                "📧 *Email Delivery Setup*\n\n"
+                "Get your full watchlist analysis delivered by email once daily.\n\n"
+                "Tap a button to configure:",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
 
     elif data == "email_set_prompt":
         await query.edit_message_text(

@@ -139,7 +139,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"👋 Welcome to StockAnalyst, {user.first_name}!\n\n"
         f"Current plan: *{tier_cfg.label}*\n"
         f"{tier_cfg.description}\n\n"
-        "Use the buttons below or type commands:"
+        "Use the buttons below or type commands:\n\n"
+        "⚠️ _Not financial advice. Algorithmic analysis for informational purposes only._"
     )
     await update.message.reply_text(
         welcome,
@@ -1655,6 +1656,9 @@ def _generate_dashboard(tickers: list[str], telegram_id: int) -> str:
         lines.append("")
 
     lines.append("_Use /analyze TICKER for full Battle Plan on any stock._")
+    lines.append("")
+    lines.append("⚠️ _Not financial advice. Algorithmic analysis for informational purposes only. Past performance does not guarantee future results._")
+    lines.append(f"_ID:{user_id}_")
 
     return "\n".join(lines)
 

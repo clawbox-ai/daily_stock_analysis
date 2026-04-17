@@ -212,10 +212,13 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans
         html += '</div>'
 
     html += f"""
-<div class="footer">
-<p>StockAnalyst Bot &mdash; <a href="https://t.me/claw_analyst_bot">@claw_analyst_bot</a></p>
-<p>Use /analyze TICKER in the bot for full Battle Plan analysis</p>
-<p>Unsubscribe: /email off in the bot</p>
+<div style="background:#f5f5f5;padding:20px 20px 16px;text-align:center;border-top:1px solid #ddd">
+<p style="margin:0 0 8px;color:#1a1a2e;font-weight:700;font-size:13px">StockAnalyst Bot &mdash; <a href="https://t.me/claw_analyst_bot" style="color:#1a1a2e">@claw_analyst_bot</a></p>
+<p style="margin:0 0 8px;font-size:12px;color:#999">Use /analyze TICKER in the bot for full Battle Plan analysis</p>
+<p style="margin:0 0 4px;font-size:11px;color:#bbb;">Unsubscribe: /email off in the bot</p>
+</div>
+<div style="background:#eee;padding:12px 20px;text-align:center">
+<p style="margin:0;font-size:10px;color:#999;">⚠️ Not financial advice. All analysis is algorithmic and for informational purposes only. Past performance does not guarantee future results. Always do your own research before making investment decisions. StockAnalyst is not a registered financial advisor.</p>
 </div>
 </div>
 </body>

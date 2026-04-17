@@ -7,7 +7,7 @@
 2. 按用户套餐发送对应的分析报告
    - Free：使用系统默认股票列表
    - Pro：使用用户自定义自选股
-   - Elite：使用用户自定义自选股 + 大盘复盘
+   - Pro：使用用户自定义自选股 + 大盘复盘
 3. 保持向后兼容：若未启用订阅模式，沿用原有 TELEGRAM_CHAT_ID 单播行为
 
 调用方式：
@@ -27,7 +27,7 @@ from src.bot import db
 from src.bot.tiers import (
     TIER_FREE,
     TIER_PRO,
-    TIER_ELITE,
+    TIER_PRO,
     can_receive_market_review,
     get_tier_config,
 )
@@ -52,7 +52,7 @@ def broadcast_daily_report(
 
     Args:
         stock_reports:       {ticker: report_text} 字典，已生成的个股报告
-        market_review:       大盘复盘文本（Elite 套餐使用）
+        market_review:       大盘复盘文本（Pro 套餐使用）
         default_stock_list:  系统默认股票列表（Free 套餐使用）；
                              若为 None，从 STOCK_LIST 环境变量读取
 
@@ -150,7 +150,7 @@ def _build_user_content(
     else:
         tickers = user.get("watchlist") or []
         if not tickers:
-            # Pro/Elite 用户未设置自选股，降级为默认列表
+            # Pro 用户未设置自选股，降级为默认列表
             tickers = default_stock_list
 
     # 收集对应个股报告
@@ -160,7 +160,7 @@ def _build_user_content(
         if report:
             parts.append(report)
 
-    # Elite 用户追加大盘复盘
+    # Pro 用户追加大盘复盘
     if can_receive_market_review(tier) and market_review:
         parts.append(market_review)
 

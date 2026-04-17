@@ -5,7 +5,7 @@
 职责：
 1. 响应用户指令：/start /subscribe /help /watchlist /analyze
 2. 注册用户、展示套餐、管理自选股
-3. 将 /analyze 请求路由到分析流水线（Pro/Elite 专属）
+3. 将 /analyze 请求路由到分析流水线（Pro 专属）
 
 依赖：
   - python-telegram-bot >= 20.0（异步版）
@@ -82,7 +82,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /help       — 查看全部指令\n"
         "  /subscribe  — 查看套餐选项\n"
         "  /watchlist  — 查看自选股列表\n"
-        "  /analyze `<代码>` — 按需分析（Pro/Elite）"
+        "  /analyze `<代码>` — 按需分析（Pro）"
     )
     await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN)
 
@@ -96,7 +96,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/watchlist  — 查看/管理自选股列表\n"
         "/analyze `<代码>` — 对指定股票发起按需分析\n"
         "              示例：`/analyze 600519`\n"
-        "              _仅 Pro / Elite 套餐可用_\n\n"
+        "              _仅 Pro 套餐可用_\n\n"
         "每日分析报告将在交易日收盘后自动推送。"
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
@@ -154,7 +154,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/analyze <ticker> — 发起按需分析（Pro/Elite 专属）"""
+    """/analyze <ticker> — 发起按需分析（Pro 专属）"""
     user = update.effective_user
     if user is None:
         return
@@ -169,7 +169,7 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not can_use_on_demand(tier):
         tier_cfg = get_tier_config(tier)
         upgrade_msg = (
-            f"⚠️ 按需分析是 *Pro / Elite* 专属功能。\n\n"
+            f"⚠️ 按需分析是 *Pro* 专属功能。\n\n"
             f"当前套餐：{tier_cfg.label}\n\n"
             "使用 /subscribe 查看升级选项。"
         )
@@ -263,7 +263,7 @@ async def _set_bot_commands(app: Application) -> None:
         BotCommand("help", "查看全部指令说明"),
         BotCommand("subscribe", "查看套餐选项"),
         BotCommand("watchlist", "查看自选股列表"),
-        BotCommand("analyze", "按需分析指定股票（Pro/Elite）"),
+        BotCommand("analyze", "按需分析指定股票（Pro）"),
     ]
     await app.bot.set_my_commands(commands)
     logger.info("Telegram 指令菜单已更新")

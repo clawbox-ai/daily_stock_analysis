@@ -93,6 +93,11 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN delivery_time TEXT NOT NULL DEFAULT '08:00'")
     except Exception:
         pass
+    try:
+        with _get_conn() as conn:
+            conn.execute("ALTER TABLE users ADD COLUMN delivery_time_change TEXT")
+    except Exception:
+        pass
     logger.info("Database initialized: %s", _get_db_path())
 
 
@@ -248,14 +253,39 @@ def set_email(telegram_id: int, email: str) -> bool:
     return cursor.rowcount > 0
 
 
-def set_email_schedule(telegram_id: int, email: str, timezone: str, delivery_time: str) -> bool:
+def set_email_schedule(telegram_id: int, email: str, timezone: str, delivery_time: str, update_time_change: bool = False) -> bool:
     """Set email, timezone, and delivery time for Pro email delivery"""
-    with _get_conn() as conn:
-        cursor = conn.execute(
-            "UPDATE users SET email = ?, timezone = ?, delivery_time = ? WHERE telegram_id = ?",
-            (email, timezone, delivery_time, telegram_id),
-        )
+    if update_time_change:
+        now = datetime.now(timezone.utc).isoformat()
+        with _get_conn() as conn:
+            cursor = conn.execute(
+                "UPDATE users SET email = ?, timezone = ?, delivery_time = ?, delivery_time_change = ? WHERE telegram_id = ?",
+                (email, timezone, delivery_time, now, telegram_id),
+            )
+    else:
+        with _get_conn() as conn:
+            cursor = conn.execute(
+                "UPDATE users SET email = ?, timezone = ?, delivery_time = ? WHERE telegram_id = ?",
+                (email, timezone, delivery_time, telegram_id),
+            )
     return cursor.rowcount > 0
+
+
+def can_change_delivery_time(telegram_id: int) -> bool:
+    """Check if user can change delivery time (once per day max)"""
+    user = get_user(telegram_id)
+    if not user:
+        return True
+    last_change = user.get("delivery_time_change")
+    if not last_change:
+        return True
+    try:
+        last_dt = datetime.fromisoformat(last_change)
+        now_dt = datetime.now(timezone.utc)
+        hours_diff = (now_dt - last_dt).total_seconds() / 3600
+        return hours_diff >= 24
+    except Exception:
+        return True
 
 
 def get_email_schedule(telegram_id: int) -> dict:
@@ -267,6 +297,7 @@ def get_email_schedule(telegram_id: int) -> dict:
         "email": user.get("email"),
         "timezone": user.get("timezone"),
         "delivery_time": user.get("delivery_time", "08:00"),
+        "delivery_time_change": user.get("delivery_time_change"),
     }
 
 

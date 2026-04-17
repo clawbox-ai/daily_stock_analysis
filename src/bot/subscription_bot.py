@@ -479,7 +479,16 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-        db.set_email_schedule(user.id, schedule["email"], schedule["timezone"], time_input)
+        # Check once-per-day limit
+        if not db.can_change_delivery_time(user.id):
+            await update.message.reply_text(
+                "⏰ You can only change your delivery time once per day.\n\n"
+                "Try again tomorrow.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        db.set_email_schedule(user.id, schedule["email"], schedule["timezone"], time_input, update_time_change=True)
         tz_display = schedule["timezone"] or "UTC"
         await update.message.reply_text(
             f"✅ Delivery time set to *{time_input}* ({tz_display})\n\n"
@@ -954,7 +963,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         time_input = data.replace("email_time_", "")
         schedule = db.get_email_schedule(user.id)
         if schedule.get("email"):
-            db.set_email_schedule(user.id, schedule["email"], schedule.get("timezone"), time_input)
+            # Check once-per-day limit for delivery time changes
+            if not db.can_change_delivery_time(user.id):
+                await query.edit_message_text(
+                    "⏰ You can only change your delivery time once per day.\n\n"
+                    "Try again tomorrow or contact support.",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+            db.set_email_schedule(user.id, schedule["email"], schedule.get("timezone"), time_input, update_time_change=True)
             tz_display = schedule.get("timezone") or "UTC"
             keyboard = [
                 [InlineKeyboardButton("📧 Email Settings", callback_data="cmd_email_view")],
@@ -962,7 +979,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text(
                 f"✅ Delivery time set to *{time_input}*\n\n"
                 f"📧 Your analysis arrives at {time_input} ({tz_display}) local time.\n\n"
-                f"_⚠️ Email delivery coming soon — settings saved!_",
+                f"_You can change this again tomorrow._",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )

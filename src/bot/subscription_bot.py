@@ -30,6 +30,7 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    JobQueue,
 )
 
 from src.bot import db
@@ -1649,7 +1650,7 @@ def _generate_dashboard(tickers: list[str], telegram_id: int) -> str:
 def build_application() -> Application:
     """Build and configure the Telegram Application"""
     token = _get_bot_token()
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).job_queue(JobQueue()).build()
 
     # Register command handlers
     app.add_handler(CommandHandler("start", cmd_start))
@@ -1685,6 +1686,17 @@ async def _set_bot_commands(app: Application) -> None:
     logger.info("Telegram command menu updated")
 
 
+async def _email_delivery_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Job queue callback: check and send daily emails to Pro users"""
+    try:
+        from src.bot.email_sender import send_daily_emails
+        stats = send_daily_emails()
+        if stats["sent"] > 0 or stats["failed"] > 0:
+            logger.info("Email delivery job: sent=%d failed=%d skipped=%d", stats["sent"], stats["failed"], stats["skipped"])
+    except Exception as e:
+        logger.error("Email delivery job failed: %s", e)
+
+
 def run_bot() -> None:
     """Start the subscription bot (blocking, suitable for standalone process)"""
     db.init_db()
@@ -1693,6 +1705,12 @@ def run_bot() -> None:
 
     async def post_init(application: Application) -> None:
         await _set_bot_commands(application)
+        # Schedule email delivery check every 30 minutes
+        application.job_queue.run_repeating(
+            _email_delivery_job,
+            interval=1800,  # 30 minutes
+            first=60,  # Start checking after 1 minute
+        )
 
     app.post_init = post_init
 

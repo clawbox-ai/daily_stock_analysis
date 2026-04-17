@@ -111,6 +111,15 @@ def get_user(telegram_id: int) -> Optional[dict]:
     return _row_to_user(row)
 
 
+def get_users_by_tier(tier: str) -> list[dict]:
+    """Get all users with a specific tier"""
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM users WHERE tier = ?", (tier,)
+        ).fetchall()
+    return [_row_to_user(row) for row in rows]
+
+
 def create_user(telegram_id: int, username: Optional[str] = None) -> dict:
     """Register new user with Free tier; returns existing user if already exists"""
     existing = get_user(telegram_id)

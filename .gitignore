@@ -79,3 +79,4 @@ static/
 /apps/dsa-desktop/dist/
 /apps/dsa-desktop/node_modules/
 credentials/
+credentials/smtp.secret.json

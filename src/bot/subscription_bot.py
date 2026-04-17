@@ -48,10 +48,24 @@ logger = logging.getLogger(__name__)
 # ===========================
 
 def _get_bot_token() -> str:
+    # Try env var first
     token = os.environ.get("SUBSCRIPTION_BOT_TOKEN", "")
-    if not token:
-        raise RuntimeError("SUBSCRIPTION_BOT_TOKEN 未配置，无法启动订阅机器人")
-    return token
+    if token:
+        return token
+    # Try secret file
+    import json
+    secret_paths = [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "credentials", "tg-bot.secret.json"),
+        "./credentials/tg-bot.secret.json",
+    ]
+    for path in secret_paths:
+        if os.path.exists(path):
+            with open(path) as f:
+                data = json.load(f)
+            token = data.get("token", data.get("BOT_TOKEN", ""))
+            if token:
+                return token
+    raise RuntimeError("SUBSCRIPTION_BOT_TOKEN not configured. Set env var or credentials/tg-bot.secret.json")
 
 
 def _get_default_stock_list() -> list[str]:

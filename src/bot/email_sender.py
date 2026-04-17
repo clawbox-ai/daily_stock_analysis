@@ -3,90 +3,76 @@
 Email delivery engine for StockAnalyst Pro.
 
 Sends full watchlist analysis to Pro users at their scheduled time.
-Supports any SMTP provider (Gmail, Resend, SendGrid, etc.)
+Uses Resend API (100 emails/day free).
 """
 import json
 import logging
 import os
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from datetime import datetime, timezone as tz
 from typing import Optional
+
+import requests
 
 from src.bot import db
 from src.bot.tiers import TIER_PRO
 
 logger = logging.getLogger(__name__)
 
-
-def _get_smtp_config() -> dict:
-    """Load SMTP config from env or credentials file"""
-    config = {
-        "host": os.environ.get("SMTP_HOST", ""),
-        "port": int(os.environ.get("SMTP_PORT", "587")),
-        "user": os.environ.get("SMTP_USER", ""),
-        "pass": os.environ.get("SMTP_PASS", ""),
-        "from_name": os.environ.get("SMTP_FROM_NAME", "StockAnalyst"),
-        "from_email": os.environ.get("SMTP_FROM_EMAIL", ""),
-    }
-
-    # Try credentials file if env vars missing
-    if not config["host"]:
-        cwd = os.getcwd()
-        key_paths = [
-            os.path.join(cwd, "credentials", "smtp.secret.json"),
-            "./credentials/smtp.secret.json",
-        ]
-        for path in key_paths:
-            try:
-                if os.path.exists(path):
-                    with open(path) as f:
-                        data = json.load(f)
-                    config["host"] = data.get("host", "")
-                    config["port"] = int(data.get("port", 587))
-                    config["user"] = data.get("user", "")
-                    config["pass_"] = data.get("pass", data.get("password", ""))
-                    config["from_name"] = data.get("from_name", "StockAnalyst")
-                    config["from_email"] = data.get("from_email", "")
-                    break
-            except Exception:
-                continue
-
-    # Rename pass_ back to pass for consistency
-    if "pass_" in config and not config["pass"]:
-        config["pass"] = config.pop("pass_")
-    elif "pass_" in config:
-        config.pop("pass_")
-
-    return config
+RESEND_API_URL = "https://api.resend.com/emails"
+FROM_EMAIL = "StockAnalyst <stockanalyst@clawbox.ai>"  # Update domain when verified
 
 
-def send_email(to_email: str, subject: str, html_body: str, text_body: str = "") -> bool:
-    """Send an email via SMTP"""
-    config = _get_smtp_config()
+def _get_resend_key() -> Optional[str]:
+    """Get Resend API key from env or credentials file"""
+    key = os.environ.get("RESEND_API_KEY", "")
+    if key:
+        return key
 
-    if not config["host"] or not config["user"] or not config["from_email"]:
-        logger.error("SMTP not configured. Set SMTP_HOST, SMTP_USER, SMTP_FROM_EMAIL env vars or credentials/smtp.secret.json")
+    cwd = os.getcwd()
+    key_paths = [
+        os.path.join(cwd, "credentials", "resend.secret.json"),
+        "./credentials/resend.secret.json",
+    ]
+    for path in key_paths:
+        try:
+            if os.path.exists(path):
+                with open(path) as f:
+                    data = json.load(f)
+                return data.get("api_key", "")
+        except Exception:
+            continue
+    return None
+
+
+def send_email(to_email: str, subject: str, html_body: str) -> bool:
+    """Send an email via Resend API"""
+    api_key = _get_resend_key()
+    if not api_key:
+        logger.error("Resend API key not configured. Set RESEND_API_KEY env var or credentials/resend.secret.json")
         return False
 
     try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = f"{config['from_name']} <{config['from_email']}>"
-        msg["To"] = to_email
+        resp = requests.post(
+            RESEND_API_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": FROM_EMAIL,
+                "to": [to_email],
+                "subject": subject,
+                "html": html_body,
+            },
+            timeout=30,
+        )
 
-        if text_body:
-            msg.attach(MIMEText(text_body, "plain"))
-        msg.attach(MIMEText(html_body, "html"))
-
-        with smtplib.SMTP(config["host"], config["port"]) as server:
-            server.starttls()
-            server.login(config["user"], config["pass"])
-            server.sendmail(config["from_email"], to_email, msg.as_string())
-
-        logger.info("Email sent to %s", to_email)
-        return True
+        if resp.status_code == 200:
+            logger.info("Email sent to %s (id=%s)", to_email, resp.json().get("id", "?"))
+            return True
+        else:
+            logger.error("Resend API error %d: %s", resp.status_code, resp.text)
+            return False
 
     except Exception as e:
         logger.error("Email send failed to %s: %s", to_email, e)
@@ -105,23 +91,33 @@ def generate_watchlist_email(tickers: list[str], username: str) -> tuple[str, st
     # Analyze all tickers
     entries = []
     for ticker in tickers:
-        price_data = _fetch_comprehensive_data(ticker)
-        ds = _calculate_deterministic_score(price_data)
-        entries.append({
-            "ticker": ticker,
-            "score": ds["score"],
-            "signal": ds["signal"],
-            "action": ds["action"],
-            "direction": ds["direction"],
-            "price_data": price_data,
-        })
+        try:
+            price_data = _fetch_comprehensive_data(ticker)
+            ds = _calculate_deterministic_score(price_data)
+            entries.append({
+                "ticker": ticker,
+                "score": ds["score"],
+                "signal": ds["signal"],
+                "action": ds["action"],
+                "direction": ds["direction"],
+                "price_data": price_data,
+            })
+        except Exception as e:
+            logger.warning("Failed to analyze %s: %s", ticker, e)
+            entries.append({
+                "ticker": ticker,
+                "score": 50,
+                "signal": "Sideways",
+                "action": "Hold",
+                "direction": "NEUTRAL",
+                "price_data": {},
+            })
 
     # Categorize
     buy = [e for e in entries if "Buy" in e["action"]]
     watch = [e for e in entries if "Hold" in e["action"] or "Watch" in e["action"]]
     sell = [e for e in entries if "Sell" in e["action"]]
 
-    # Build HTML
     subject = f"📊 StockAnalyst Daily — {date_str}"
 
     html = f"""<!DOCTYPE html>
@@ -132,7 +128,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans
 .container {{ max-width: 600px; margin: 0 auto; }}
 .header {{ text-align: center; padding: 20px; border-bottom: 2px solid #333; }}
 .header h1 {{ color: #00ff88; margin: 0; }}
-.summary {{ background: #1a1a1a; border-radius: 8px; padding: 15px; margin: 15px 0; }}
+.summary {{ background: #1a1a1a; border-radius: 8px; padding: 15px; margin: 15px 0; text-align: center; }}
 .section {{ background: #1a1a1a; border-radius: 8px; padding: 15px; margin: 10px 0; }}
 .section h2 {{ margin-top: 0; }}
 .buy {{ border-left: 3px solid #00ff88; }}
@@ -153,41 +149,42 @@ a {{ color: #00ff88; }}
 <div class="header">
 <h1>📊 StockAnalyst Daily</h1>
 <p>{date_str} — Analyzed {len(entries)} stocks</p>
-<p>Buy: {len(buy)} | Watch: {len(watch)} | Sell: {len(sell)}</p>
+</div>
+<div class="summary">
+<strong>🟢 Buy: {len(buy)}</strong> &nbsp;|&nbsp; <strong>🟡 Watch: {len(watch)}</strong> &nbsp;|&nbsp; <strong>🔴 Sell: {len(sell)}</strong>
 </div>
 """
 
     if buy:
         html += '<div class="section buy"><h2>🟢 Buy</h2>'
         for e in buy:
-            score_class = "score-high" if e["score"] >= 70 else "score-mid"
-            html += f'<div class="stock-row"><span class="stock-ticker">{e["ticker"]}</span><span class="score {score_class}">{e["score"]} — {e["signal"]}</span></div>'
+            sc = "score-high" if e["score"] >= 70 else "score-mid"
+            pd = e["price_data"]
+            price = pd.get("Price", "N/A")
+            change = pd.get("Change", "")
+            html += f'<div class="stock-row"><span class="stock-ticker">{e["ticker"]}</span><span class="score {sc}">{e["score"]} — {e["signal"]}</span></div>'
+            html += f'<div class="stock-row" style="font-size:13px;color:#aaa"><span>{price} {change}</span><span>RSI: {pd.get("RSI (14)","—")} | MACD: {pd.get("MACD Signal","—")}</span></div>'
         html += '</div>'
 
     if watch:
         html += '<div class="section watch"><h2>🟡 Watch</h2>'
         for e in watch:
-            score_class = "score-mid"
-            html += f'<div class="stock-row"><span class="stock-ticker">{e["ticker"]}</span><span class="score {score_class}">{e["score"]} — {e["signal"]}</span></div>'
+            pd = e["price_data"]
+            price = pd.get("Price", "N/A")
+            change = pd.get("Change", "")
+            html += f'<div class="stock-row"><span class="stock-ticker">{e["ticker"]}</span><span class="score score-mid">{e["score"]} — {e["signal"]}</span></div>'
+            html += f'<div class="stock-row" style="font-size:13px;color:#aaa"><span>{price} {change}</span><span>RSI: {pd.get("RSI (14)","—")} | MACD: {pd.get("MACD Signal","—")}</span></div>'
         html += '</div>'
 
     if sell:
         html += '<div class="section sell"><h2>🔴 Sell</h2>'
         for e in sell:
-            score_class = "score-low"
-            html += f'<div class="stock-row"><span class="stock-ticker">{e["ticker"]}</span><span class="score {score_class}">{e["score"]} — {e["signal"]}</span></div>'
+            pd = e["price_data"]
+            price = pd.get("Price", "N/A")
+            change = pd.get("Change", "")
+            html += f'<div class="stock-row"><span class="stock-ticker">{e["ticker"]}</span><span class="score score-low">{e["score"]} — {e["signal"]}</span></div>'
+            html += f'<div class="stock-row" style="font-size:13px;color:#aaa"><span>{price} {change}</span><span>RSI: {pd.get("RSI (14)","—")} | MACD: {pd.get("MACD Signal","—")}</span></div>'
         html += '</div>'
-
-    # Add price details for each stock
-    html += '<div class="section"><h2>📈 Price Details</h2>'
-    for e in entries:
-        pd = e["price_data"]
-        price = pd.get("Price", "N/A")
-        change = pd.get("Change", "")
-        rsi = pd.get("RSI (14)", "")
-        macd = pd.get("MACD Signal", "")
-        html += f'<div class="stock-row"><span><strong>{e["ticker"]}</strong> — {price} {change}</span><span>RSI: {rsi} | MACD: {macd}</span></div>'
-    html += '</div>'
 
     html += f"""
 <div class="footer">
@@ -199,25 +196,17 @@ a {{ color: #00ff88; }}
 </body>
 </html>"""
 
-    # Plain text fallback
-    text = f"StockAnalyst Daily — {date_str}\n\n"
-    text += f"Analyzed {len(entries)} stocks | Buy: {len(buy)} | Watch: {len(watch)} | Sell: {len(sell)}\n\n"
-    for e in entries:
-        text += f"{e['ticker']}: Score {e['score']} | {e['signal']} | {e['action']}\n"
-    text += "\nUse /analyze TICKER for full Battle Plan.\n@claw_analyst_bot"
-
     return subject, html
 
 
 def send_daily_emails() -> dict:
     """
     Send daily email to all Pro users who have email configured.
-    Checks each user's delivery_time against current UTC time.
+    Checks each user's delivery_time against their local time.
     Returns stats: {sent, failed, skipped}
     """
     stats = {"sent": 0, "failed": 0, "skipped": 0}
 
-    # Get all Pro users
     pro_users = db.get_users_by_tier(TIER_PRO)
 
     for user in pro_users:
@@ -235,15 +224,14 @@ def send_daily_emails() -> dict:
                 import zoneinfo
                 tz_obj = zoneinfo.ZoneInfo(timezone_str)
                 now_local = datetime.now(tz_obj)
-                current_time = now_local.strftime("%H:%M")
-                # Check within 30 min window
-                current_min = int(current_time.split(":")[0]) * 60 + int(current_time.split(":")[1])
+                current_hm = now_local.strftime("%H:%M")
+                current_min = int(current_hm.split(":")[0]) * 60 + int(current_hm.split(":")[1])
                 delivery_min = int(delivery_time.split(":")[0]) * 60 + int(delivery_time.split(":")[1])
                 if abs(current_min - delivery_min) > 30:
                     stats["skipped"] += 1
                     continue
             except Exception:
-                pass  # If timezone fails, just send anyway
+                pass
 
         # Get watchlist
         watchlist = user.get("watchlist", [])
@@ -251,9 +239,11 @@ def send_daily_emails() -> dict:
             stats["skipped"] += 1
             continue
 
-        # Generate and send email
+        # Generate and send
         try:
-            subject, html = generate_watchlist_email(watchlist, user.get("username", "Trader"))
+            subject, html = generate_watchlist_email(
+                watchlist, user.get("username", "Trader")
+            )
             ok = send_email(email, subject, html)
             if ok:
                 stats["sent"] += 1

@@ -1754,7 +1754,7 @@ def _generate_dashboard(tickers: list[str], telegram_id: int) -> str:
     Generate a Decision Dashboard for all watchlist stocks.
     Uses deterministic scoring from math — same data = same scores every time.
     """
-    from datetime import datetime, timezone as tz
+    from datetime import datetime, timezone
 
     # Fetch price data and calculate scores for all tickers
     stock_entries = []
@@ -1778,7 +1778,7 @@ def _generate_dashboard(tickers: list[str], telegram_id: int) -> str:
     watch.sort(key=lambda x: x["score"], reverse=True)
     sell.sort(key=lambda x: x["score"], reverse=True)
 
-    date_str = datetime.now(tz(timedelta(hours=10))).strftime("%Y-%m-%d")
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     lines = [
         f"📊 *Decision Dashboard* — {date_str}",
@@ -1808,7 +1808,7 @@ def _generate_dashboard(tickers: list[str], telegram_id: int) -> str:
     lines.append("_Use /analyze TICKER for full Battle Plan on any stock._")
     lines.append("")
     lines.append("⚠️ _Not financial advice. Algorithmic analysis for informational purposes only. Past performance does not guarantee future results._")
-    lines.append(f"_ID:{user_id}_")
+    lines.append(f"_ID:{telegram_id}_")
 
     return "\n".join(lines)
 

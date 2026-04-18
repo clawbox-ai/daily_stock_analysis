@@ -1298,7 +1298,7 @@ def _run_single_stock_analysis(ticker: str, telegram_id: int) -> str:
         results = pipeline.run(stocks=[ticker], notify=False)
 
         if not results:
-            return _direct_llm_analysis(ticker)
+            return _direct_llm_analysis(ticker, telegram_id)
 
         result = results[0] if isinstance(results, list) else results
         if hasattr(result, "to_markdown"):
@@ -1306,7 +1306,7 @@ def _run_single_stock_analysis(ticker: str, telegram_id: int) -> str:
         return str(result)
     except Exception as e:
         logger.warning("Full pipeline failed, falling back to direct LLM: %s", e)
-        return _direct_llm_analysis(ticker)
+        return _direct_llm_analysis(ticker, telegram_id)
 
 
 def _calculate_deterministic_score(price_data: dict) -> dict:
@@ -1485,7 +1485,7 @@ def _calculate_deterministic_score(price_data: dict) -> dict:
     }
 
 
-def _direct_llm_analysis(ticker: str) -> str:
+def _direct_llm_analysis(ticker: str, telegram_id: int = None) -> str:
     """
     Direct LLM analysis using OpenAI GPT-4o-mini.
     Score/Signal/Action/Direction are calculated deterministically from math.
@@ -1513,8 +1513,9 @@ def _direct_llm_analysis(ticker: str) -> str:
                 price_vs_ma20=price_vs_ma20,
                 change_pct=ds.get("change_pct", 0),
             )
-            logger.info(f"EW Sentiment for {ticker}: {ew_sentiment['direction']} @ {ew_sentiment['confidence']:.1%} "
-                       f"({ew_sentiment['consensus']}, {ew_sentiment['validation']})")
+            logger.info(f"EW Sentiment for {ticker}: {ew_sentiment.get('description', 'N/A')} "
+                       f"confidence={ew_sentiment.get('confidence_index', 0)}/100 "
+                       f"validation={ew_sentiment.get('validation', 'N/A')}")
     except Exception as e:
         logger.warning(f"EW Sentiment failed for {ticker}: {e}")
 
@@ -1620,26 +1621,30 @@ def _direct_llm_analysis(ticker: str) -> str:
         f"6. Trend direction clear: [Pass / Fail]\n\n"
     )
 
-    # Add EW sentiment section for Pro users
+    # Add EW sentiment context for Pro users (woven into narrative)
     if ew_sentiment and ew_sentiment.get('sources', 0) > 0:
         ew_dir = ew_sentiment['direction']
-        if ew_dir == 'UP':
-            ew_emoji = "\U0001f535"
-        elif ew_dir == 'DOWN':
-            ew_emoji = "\U0001f534"
-        else:
-            ew_emoji = "\U0001f7e1"
-        prompt += (
-            f"\n*\U0001f30a Elliott Wave Sentiment* (Pro)\n"
-            f"{ew_emoji} Crowd: {ew_sentiment['direction']} @ {ew_sentiment['confidence']:.0%}\n"
-            f"\U0001f4ca Sources: {ew_sentiment['sources']} posts "
-            f"({ew_sentiment['bull_count']}B/{ew_sentiment['bear_count']}S/{ew_sentiment.get('neutral_count', 0)}N)\n"
-            f"\U0001f9ec Wave consensus: {ew_sentiment['consensus']}"
-        )
+        ew_wave_desc = ""
         if ew_sentiment.get('avg_wave'):
-            prompt += f" (avg wave {ew_sentiment['avg_wave']:.0f})"
+            w = int(ew_sentiment['avg_wave'])
+            wave_names = {1: 'wave 1 (early impulse)', 2: 'wave 2 (pullback/retrace)', 3: 'wave 3 (strong impulse)', 4: 'wave 4 (consolidation)', 5: 'wave 5 (final extension)'}
+            ew_wave_desc = f" Crowd consensus suggests we're in {wave_names.get(w, f'wave {w}')}."
+        validation_desc = ""
+        if ew_sentiment['validation'] == 'confirmed':
+            validation_desc = " Price structure CONFIRMS the crowd's EW reading."
+        elif ew_sentiment['validation'] == 'divergent':
+            validation_desc = " Price structure DIVERGES from crowd — contrarian signal possible."
         prompt += (
-            f"\n\U0001f504 Validation: {ew_sentiment['validation']} — {ew_sentiment['reason']}\n"
+            f"\n*Elliott Wave Context (Pro-only data):*\n"
+            f"Social sentiment from {ew_sentiment['sources']} posts: "
+            f"{ew_sentiment['bull_count']} bullish, {ew_sentiment['bear_count']} bearish. "
+            f"Consensus: {ew_sentiment['direction']}.{ew_wave_desc}{validation_desc}\n"
+            f"Validation: {ew_sentiment['reason']}.\n\n"
+            f"IMPORTANT: Weave this EW insight naturally into your analysis. "
+            f"For example: 'Currently in potential wave 4 consolidation' or "
+            f"'Possible bottom off wave 2 of a bullish impulse sequence on higher timeframes.' "
+            f"Mention the EW reading in Key Updates and Core Decision sections. "
+            f"If structure diverges from crowd, flag the contrarian opportunity."
         )
 
     prompt += (
@@ -1830,12 +1835,23 @@ def _format_deterministic_report(ticker: str, price_data: dict, ds: dict, ew_sen
             ew_emoji = "🟡"
         lines.extend([
             "",
-            f"*🌊 Elliott Wave Sentiment* _(Pro)_",
-            f"{ew_emoji} Crowd: {ew_sentiment['direction']} @ {ew_sentiment['confidence']:.0%}",
-            f"📊 Sources: {ew_sentiment['sources']} posts ({ew_sentiment['bull_count']}B/{ew_sentiment['bear_count']}S/{ew_sentiment.get('neutral_count', 0)}N)",
-            f"🧬 Consensus: {ew_sentiment['consensus']}" + (f" (avg wave {ew_sentiment['avg_wave']:.0f})" if ew_sentiment.get('avg_wave') else ""),
-            f"🔄 Validation: {ew_sentiment['validation']} — {ew_sentiment['reason']}",
+            "*🌊 Elliott Wave Context* _(Pro)_",
         ])
+        # Natural language description
+        if ew_sentiment.get('avg_wave'):
+            w = int(ew_sentiment['avg_wave'])
+            wave_names = {1: 'early impulse (wave 1)', 2: 'pullback/retrace (wave 2)', 3: 'strong impulse (wave 3)', 4: 'consolidation (wave 4)', 5: 'final extension (wave 5)'}
+            lines.append(f"📍 Currently in potential {wave_names.get(w, f'wave {w}')} based on crowd consensus")
+        
+        if ew_sentiment['direction'] != 'FLAT':
+            lines.append(f"{ew_emoji} Crowd leans {ew_sentiment['direction']} ({ew_sentiment['bull_count']}B/{ew_sentiment['bear_count']}S from {ew_sentiment['sources']} sources)")
+        
+        if ew_sentiment['validation'] == 'confirmed':
+            lines.append("✅ Price structure confirms the EW reading")
+        elif ew_sentiment['validation'] == 'divergent':
+            lines.append("⚠️ Structure diverges from crowd — contrarian opportunity")
+        else:
+            lines.append(f"🔄 {ew_sentiment['reason']}")
 
     return "\n".join(lines)
 

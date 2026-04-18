@@ -1,8 +1,11 @@
 """
 Elliott Wave Sentiment Engine for StockAnalyst Pro.
 
-Scrapes social media for EW opinions, classifies sentiment,
-validates against price structure, and produces a fused signal.
+Scrapes social media for EW opinions, validates against price structure,
+and produces a clean trader-facing analysis with confidence index.
+
+The output reads like a trader's EW analysis — no mention of scraping,
+sources, or social posts. Background logic only.
 """
 
 import logging
@@ -16,220 +19,412 @@ import requests
 logger = logging.getLogger(__name__)
 
 
-# ─── Sentiment Classification ─────────────────────────────────
+# ─── EW Pattern Recognition ───────────────────────────────────
 
-EW_BULLISH_PATTERNS = [
-    r'\bwave\s*3\b', r'\bwave\s*1\b', r'\bimpulse\s*up\b',
-    r'\bbullish\s*ew\b', r'\bbullish\s*elliott\b',
-    r'\bwave\s*5\s*extension\b', r'\bbreakout\b.*\bwave\b',
-    r'\bup\s*impulse\b', r'\bleading\s*diagonal\b',
-    r'\bending\s*diagonal\s*up\b',
-]
+# Wave classification patterns with timeframe inference
+EW_PATTERNS = {
+    'impulse_up': {
+        'regex': [r'\bwave\s*3\b', r'\bimpulse\s*up\b', r'\bbullish\s*impulse\b',
+                  r'\bbreakout\b.*\bwave\b', r'\bwave\s*1\b.*\bup\b',
+                  r'\bleading\s*diagonal\b', r'\bextending\b.*\bup\b'],
+        'direction': 'UP',
+        'wave': 3,  # default to wave 3 for impulse
+        'structure': 'impulse',
+    },
+    'wave1_up': {
+        'regex': [r'\bwave\s*1\b', r'\bnew\s*trend\b', r'\bfresh\s*impulse\b',
+                  r'\bstart\s*of\s*new\b', r'\bbottom\s*in\b'],
+        'direction': 'UP',
+        'wave': 1,
+        'structure': 'impulse',
+    },
+    'wave5_up': {
+        'regex': [r'\bwave\s*5\b', r'\bwave\s*v\b', r'\bfifth\s*wave\b',
+                  r'\bending\s*diagonal\s*up\b', r'\bfinal\s*thrust\b',
+                  r'\blast\s*leg\s*up\b'],
+        'direction': 'UP',
+        'wave': 5,
+        'structure': 'impulse',
+    },
+    'correction_down': {
+        'regex': [r'\bwave\s*2\b', r'\bwave\s*4\b', r'\bcorrection\b',
+                  r'\bretracement\b', r'\bpullback\b', r'\babc\b.*\bdown\b',
+                  r'\bzigzag\b.*\bdown\b', r'\bflat\s*correction\b',
+                  r'\bwave\s*b\b', r'\bdip\b.*\bbuy\b'],
+        'direction': 'DOWN',
+        'wave': 4,  # corrections could be 2 or 4
+        'structure': 'corrective',
+    },
+    'bearish_impulse': {
+        'regex': [r'\bwave\s*3\b.*\bdown\b', r'\bbearish\s*impulse\b',
+                  r'\bwave\s*1\b.*\bdown\b', r'\bcrash\b', r'\bdump\b',
+                  r'\bcapitulation\b', r'\bfalling\s*knife\b'],
+        'direction': 'DOWN',
+        'wave': 3,
+        'structure': 'impulse',
+    },
+    'wave5_down': {
+        'regex': [r'\bwave\s*5\b.*\bdown\b', r'\bwave\s*v\b.*\bdown\b',
+                  r'\bfinal\s*decline\b', r'\bending\s*diagonal\s*down\b',
+                  r'\bexhaustion\b'],
+        'direction': 'DOWN',
+        'wave': 5,
+        'structure': 'impulse',
+    },
+    'sideways': {
+        'regex': [r'\bsideways\b', r'\branging\b', r'\bconsolidat',
+                  r'\btriangle\b', r'\bflat\s*range\b', r'\bchoppy\b',
+                  r'\bwave\s*4\b.*\bsideways\b'],
+        'direction': 'FLAT',
+        'wave': 4,
+        'structure': 'corrective',
+    },
+}
 
-EW_BEARISH_PATTERNS = [
-    r'\bwave\s*[4c]\b', r'\bcorrecti[vo]n\b', r'\babc\b.*\bdown\b',
-    r'\bbearish\s*ew\b', r'\bbearish\s*elliott\b',
-    r'\bwave\s*[2b]\b.*\bretrac', r'\bzigzag\b.*\bdown\b',
-    r'\bflat\s*correct', r'\btriangle\b.*\bbear\b',
-    r'\bdown\s*impulse\b',
-]
+GENERAL_BULLISH = [r'\bbullish\b', r'\bpump\b', r'\bmoon\b', r'\blong\b', r'\bbuy\b',
+                   r'\bbreakout\b', r'\bsupport\b', r'\bbounce\b']
+GENERAL_BEARISH = [r'\bbearish\b', r'\bdump\b', r'\bshort\b', r'\bsell\b',
+                   r'\bcrash\b', r'\bresistance\b', r'\bdrop\b']
 
-EW_NEUTRAL_PATTERNS = [
-    r'\bsideways\b', r'\branging\b', r'\bconsolidat',
-    r'\bwave\s*4\b', r'\btriangle\b.*\bneutral\b',
-    r'\bflat\s*range\b',
-]
+CONFIDENCE_BOOSTERS = [r'\bdefinitely\b', r'\bcertainly\b', r'\bclearly\b',
+                        r'\bobvious\b', r'\bstrong\b', r'\bconfirmed\b']
+CONFIDENCE_REDUCERS = [r'\bmaybe\b', r'\bperhaps\b', r'\blooks\s*like\b',
+                        r'\bpossibly\b', r'\bmight\b', r'\bcould\b', r'\bseems\b']
 
-WAVE_NUMBER_RE = re.compile(r'\bwave\s*(\d)\b', re.IGNORECASE)
-CONFIDENCE_BOOSTERS = [r'\bdefinitely\b', r'\bcertainly\b', r'\bclearly\b', r'\bobvious\b', r'\bstrong\b']
-CONFIDENCE_REDUCERS = [r'\bmaybe\b', r'\bperhaps\b', r'\blooks\s*like\b', r'\bpossibly\b', r'\bmight\b', r'\bcould\b']
+# Timeframe keywords
+TIMEFRAME_MAP = {
+    '1m': '1-minute', '5m': '5-minute', '15m': '15-minute',
+    '1h': '1-hour', '4h': '4-hour', 'h4': '4-hour',
+    '1d': 'daily', 'daily': 'daily', 'day': 'daily',
+    '1w': 'weekly', 'weekly': 'weekly', 'week': 'weekly',
+    '1M': 'monthly', 'monthly': 'monthly',
+}
 
 
 def classify_text(text: str) -> dict:
     """Classify a single text for EW sentiment.
     
-    Returns: {
-        'direction': 'UP' | 'DOWN' | 'FLAT' | None,
-        'wave_count': int | None,  # which wave number mentioned
-        'confidence': float,  # 0.0-1.0
-        'source_text': str,  # original text (truncated)
-    }
+    Returns clean internal data — no social references.
     """
     text_lower = text.lower()
     
-    # Direction scoring
-    bull_score = sum(1 for p in EW_BULLISH_PATTERNS if re.search(p, text_lower))
-    bear_score = sum(1 for p in EW_BEARISH_PATTERNS if re.search(p, text_lower))
-    neut_score = sum(1 for p in EW_NEUTRAL_PATTERNS if re.search(p, text_lower))
+    # Extract timeframe
+    timeframe = '4-hour'  # default
+    for tf_key, tf_name in TIMEFRAME_MAP.items():
+        if tf_key in text_lower:
+            timeframe = tf_name
+            break
     
-    # Also check general sentiment if no EW patterns
-    general_bull = sum(1 for w in ['bullish', 'pump', 'moon', 'long', 'buy', 'up', 'breakout']
-                       if w in text_lower)
-    general_bear = sum(1 for w in ['bearish', 'dump', 'short', 'sell', 'down', 'crash', 'drop']
-                       if w in text_lower)
+    # Check for explicit timeframe phrases
+    if 'daily' in text_lower or '1 day' in text_lower or '1d' in text_lower:
+        timeframe = 'daily'
+    elif 'weekly' in text_lower or '1 week' in text_lower:
+        timeframe = 'weekly'
     
-    bull_total = bull_score * 2 + general_bull
-    bear_total = bear_score * 2 + general_bear
-    neut_total = neut_score
+    # Pattern matching with scoring
+    best_pattern = None
+    best_score = 0
+    matched_wave = None
+    
+    for pattern_name, pattern_data in EW_PATTERNS.items():
+        score = sum(2 if re.search(p, text_lower) else 0 for p in pattern_data['regex'])
+        if score > best_score:
+            best_score = score
+            best_pattern = pattern_name
+            matched_wave = pattern_data['wave']
+    
+    # Also check general sentiment
+    gen_bull = sum(1 for p in GENERAL_BULLISH if re.search(p, text_lower))
+    gen_bear = sum(1 for p in GENERAL_BEARISH if re.search(p, text_lower))
     
     # Determine direction
-    if bull_total == 0 and bear_total == 0 and neut_total == 0:
-        direction = None  # No signal
-        raw_conf = 0.0
-    elif bull_total > bear_total and bull_total > neut_total:
+    if best_pattern:
+        direction = EW_PATTERNS[best_pattern]['direction']
+        structure = EW_PATTERNS[best_pattern]['structure']
+        wave = matched_wave
+        raw_conf = min(0.80, 0.55 + best_score * 0.05)
+    elif gen_bull > gen_bear:
         direction = 'UP'
-        raw_conf = bull_total / (bull_total + bear_total + neut_total + 0.1)
-    elif bear_total > bull_total and bear_total > neut_total:
+        structure = 'unknown'
+        wave = None
+        raw_conf = 0.55
+    elif gen_bear > gen_bull:
         direction = 'DOWN'
-        raw_conf = bear_total / (bull_total + bear_total + neut_total + 0.1)
+        structure = 'unknown'
+        wave = None
+        raw_conf = 0.55
     else:
         direction = 'FLAT'
-        raw_conf = 0.5
-    
-    # Wave count extraction
-    wave_match = WAVE_NUMBER_RE.search(text_lower)
-    wave_count = int(wave_match.group(1)) if wave_match else None
+        structure = 'unknown'
+        wave = None
+        raw_conf = 0.50
     
     # Confidence modifiers
     conf_boost = sum(1 for p in CONFIDENCE_BOOSTERS if re.search(p, text_lower))
     conf_reduce = sum(1 for p in CONFIDENCE_REDUCERS if re.search(p, text_lower))
-    
-    confidence = min(0.85, max(0.50, raw_conf * 0.6 + 0.40 + conf_boost * 0.05 - conf_reduce * 0.05))
+    confidence = min(0.85, max(0.50, raw_conf + conf_boost * 0.03 - conf_reduce * 0.03))
     
     return {
         'direction': direction,
-        'wave_count': wave_count,
+        'wave': wave,
+        'structure': structure,
+        'timeframe': timeframe,
         'confidence': confidence,
-        'source_text': text[:200],
+        'text': text[:200],
     }
 
 
-def aggregate_sentiments(classifications: list[dict]) -> dict:
-    """Aggregate multiple classifications into a single signal.
+def aggregate_classifications(classifications: list[dict]) -> dict:
+    """Aggregate classifications into a clean internal signal.
     
-    Returns: {
-        'direction': 'UP' | 'DOWN' | 'FLAT',
-        'confidence': float,
-        'count': int,
-        'bull_count': int,
-        'bear_count': int,
-        'neutral_count': int,
-        'avg_wave': float | None,
-        'consensus': str,  # 'strong_bull', 'bull', 'mixed', 'bear', 'strong_bear'
-    }
+    No mention of sources, posts, or social data.
     """
     if not classifications:
         return {
-            'direction': 'FLAT', 'confidence': 0.50, 'count': 0,
-            'bull_count': 0, 'bear_count': 0, 'neutral_count': 0,
-            'avg_wave': None, 'consensus': 'no_data',
+            'direction': 'FLAT', 'confidence': 0.50, 'wave': None,
+            'structure': 'unknown', 'timeframe': '4-hour',
+            'count': 0, 'validation': 'no_data',
         }
     
-    bull = [c for c in classifications if c['direction'] == 'UP']
-    bear = [c for c in classifications if c['direction'] == 'DOWN']
-    neut = [c for c in classifications if c['direction'] == 'FLAT']
-    none_c = [c for c in classifications if c['direction'] is None]
+    # Weight by confidence
+    up_weight = sum(c['confidence'] for c in classifications if c['direction'] == 'UP')
+    down_weight = sum(c['confidence'] for c in classifications if c['direction'] == 'DOWN')
+    flat_weight = sum(c['confidence'] for c in classifications if c['direction'] == 'FLAT')
     
-    total = len(classifications)
-    bull_weight = sum(c['confidence'] for c in bull) if bull else 0
-    bear_weight = sum(c['confidence'] for c in bear) if bear else 0
+    total = up_weight + down_weight + flat_weight
     
-    # Weighted direction
-    if bull_weight > bear_weight and len(bull) > len(bear):
+    if total == 0:
+        direction = 'FLAT'
+        confidence = 0.50
+    elif up_weight > down_weight and up_weight > flat_weight:
         direction = 'UP'
-        confidence = min(0.80, 0.50 + (bull_weight / total) * 0.3)
-    elif bear_weight > bull_weight and len(bear) > len(bull):
+        confidence = min(0.85, 0.50 + (up_weight / total) * 0.35)
+    elif down_weight > up_weight and down_weight > flat_weight:
         direction = 'DOWN'
-        confidence = min(0.80, 0.50 + (bear_weight / total) * 0.3)
+        confidence = min(0.85, 0.50 + (down_weight / total) * 0.35)
     else:
         direction = 'FLAT'
         confidence = 0.50
     
-    # Average wave count
-    waves = [c['wave_count'] for c in classifications if c['wave_count'] is not None]
-    avg_wave = sum(waves) / len(waves) if waves else None
+    # Most common wave and timeframe
+    waves = [c['wave'] for c in classifications if c['wave'] is not None]
+    timeframes = [c['timeframe'] for c in classifications]
     
-    # Consensus label
-    bull_pct = len(bull) / total if total else 0
-    bear_pct = len(bear) / total if total else 0
+    avg_wave = None
+    if waves:
+        from collections import Counter
+        wave_counts = Counter(waves)
+        avg_wave = wave_counts.most_common(1)[0][0]
     
-    if bull_pct > 0.7:
-        consensus = 'strong_bull'
-    elif bull_pct > 0.5:
-        consensus = 'bull'
-    elif bear_pct > 0.7:
-        consensus = 'strong_bear'
-    elif bear_pct > 0.5:
-        consensus = 'bear'
+    # Most common structure
+    structures = [c['structure'] for c in classifications]
+    structure = 'impulse' if sum(1 for s in structures if s == 'impulse') > len(structures) / 2 else 'corrective'
+    
+    # Timeframe
+    if timeframes:
+        from collections import Counter
+        tf_counts = Counter(timeframes)
+        timeframe = tf_counts.most_common(1)[0][0]
     else:
-        consensus = 'mixed'
+        timeframe = '4-hour'
     
     return {
         'direction': direction,
         'confidence': confidence,
-        'count': total,
-        'bull_count': len(bull),
-        'bear_count': len(bear),
-        'neutral_count': len(neut) + len(none_c),
-        'avg_wave': avg_wave,
-        'consensus': consensus,
+        'wave': avg_wave,
+        'structure': structure,
+        'timeframe': timeframe,
+        'count': len(classifications),
+        'validation': 'pending',  # will be set by structure validator
+    }
+
+
+def validate_ew_against_structure(
+    ew_data: dict,
+    rsi: float = 50,
+    macd_signal: Optional[str] = None,
+    price_vs_ma20: str = 'neutral',
+    change_pct: float = 0,
+) -> dict:
+    """Validate EW reading against price structure.
+    
+    This is the core logic:
+    - If EW says bullish impulse and RSI/MACD/MA confirm → high confidence
+    - If EW says bullish but structure says overbought → divergence, lower confidence
+    - If EW says correction and structure confirms → validated
+    
+    Returns a clean trader-facing analysis.
+    """
+    direction = ew_data.get('direction', 'FLAT')
+    confidence = ew_data.get('confidence', 0.50)
+    wave = ew_data.get('wave')
+    structure_type = ew_data.get('structure', 'unknown')
+    timeframe = ew_data.get('timeframe', '4-hour')
+    
+    # Build structure confirmation score (0-100)
+    structure_score = 50  # neutral baseline
+    
+    # RSI check
+    if direction == 'UP':
+        if 40 <= rsi <= 65:
+            structure_score += 15  # bullish RSI range
+        elif rsi > 70:
+            structure_score -= 20  # overbought = risk for bullish
+        elif rsi < 35:
+            structure_score += 10  # oversold bounce
+    elif direction == 'DOWN':
+        if 35 <= rsi <= 60:
+            structure_score += 10  # bearish RSI range
+        elif rsi < 30:
+            structure_score -= 15  # oversold = bounce risk for bearish
+        elif rsi > 65:
+            structure_score += 15  # overbought = sell signal
+    
+    # MACD check
+    if macd_signal:
+        if direction == 'UP' and macd_signal == 'bullish':
+            structure_score += 15
+        elif direction == 'UP' and macd_signal == 'bearish':
+            structure_score -= 15
+        elif direction == 'DOWN' and macd_signal == 'bearish':
+            structure_score += 15
+        elif direction == 'DOWN' and macd_signal == 'bullish':
+            structure_score -= 15
+    
+    # MA alignment check
+    if direction == 'UP' and price_vs_ma20 == 'above':
+        structure_score += 10
+    elif direction == 'UP' and price_vs_ma20 == 'below':
+        structure_score -= 10
+    elif direction == 'DOWN' and price_vs_ma20 == 'below':
+        structure_score += 10
+    elif direction == 'DOWN' and price_vs_ma20 == 'above':
+        structure_score -= 10
+    
+    # Price momentum check
+    if direction == 'UP' and change_pct > 1:
+        structure_score += 10
+    elif direction == 'UP' and change_pct < -1:
+        structure_score -= 10
+    elif direction == 'DOWN' and change_pct < -1:
+        structure_score += 10
+    elif direction == 'DOWN' and change_pct > 1:
+        structure_score -= 10
+    
+    # Clamp
+    structure_score = max(0, min(100, structure_score))
+    
+    # Determine validation
+    if structure_score >= 70:
+        validation = 'confirmed'
+    elif structure_score >= 55:
+        validation = 'supported'
+    elif structure_score >= 40:
+        validation = 'neutral'
+    elif structure_score >= 25:
+        validation = 'divergent'
+    else:
+        validation = 'contrarian'
+    
+    # Build the EW description
+    wave_names = {
+        1: 'wave 1 (early impulse)',
+        2: 'wave 2 (pullback)',
+        3: 'wave 3 (strong impulse)',
+        4: 'wave 4 (consolidation)',
+        5: 'wave 5 (final extension)',
+    }
+    
+    # Final confidence index (0-100)
+    # Base from EW sentiment, adjusted by structure validation
+    if validation in ('confirmed', 'supported'):
+        ew_confidence = min(95, int(confidence * 100 + structure_score * 0.2))
+    elif validation == 'neutral':
+        ew_confidence = int(confidence * 100)
+    elif validation == 'divergent':
+        ew_confidence = max(20, int(confidence * 100 - 20))
+    else:  # contrarian
+        ew_confidence = max(15, int(confidence * 100 - 30))
+    
+    # Build natural language description
+    if wave and wave in wave_names:
+        if direction == 'UP':
+            if structure_type == 'impulse':
+                desc = f"Bullish impulse — currently in {wave_names[wave]} on {timeframe} timeframe"
+            else:
+                desc = f"Bullish retrace — potential {wave_names[wave]} on {timeframe} timeframe"
+        elif direction == 'DOWN':
+            if structure_type == 'corrective':
+                desc = f"Corrective {wave_names[wave]} on {timeframe} timeframe"
+            else:
+                desc = f"Bearish impulse — {wave_names[wave]} on {timeframe} timeframe"
+        else:
+            desc = f"Sideways {wave_names[wave]} on {timeframe} timeframe"
+    else:
+        if direction == 'UP':
+            desc = f"Bullish structure on {timeframe} timeframe"
+        elif direction == 'DOWN':
+            desc = f"Bearish structure on {timeframe} timeframe"
+        else:
+            desc = f"Consolidating on {timeframe} timeframe"
+    
+    # Validation description
+    if validation == 'confirmed':
+        val_desc = f"Indicators confirm the EW reading (confidence: {ew_confidence}/100)"
+    elif validation == 'supported':
+        val_desc = f"Indicators support the EW reading (confidence: {ew_confidence}/100)"
+    elif validation == 'neutral':
+        val_desc = f"Mixed signals — EW reading uncertain (confidence: {ew_confidence}/100)"
+    elif validation == 'divergent':
+        val_desc = f"Indicators diverge from EW reading — caution (confidence: {ew_confidence}/100)"
+    else:  # contrarian
+        val_desc = f"Indicators contradict EW — potential reversal (confidence: {ew_confidence}/100)"
+    
+    return {
+        'direction': direction,
+        'wave': wave,
+        'timeframe': timeframe,
+        'structure': structure_type,
+        'description': desc,
+        'validation': validation,
+        'validation_desc': val_desc,
+        'confidence_index': ew_confidence,  # 0-100
+        'structure_score': structure_score,  # 0-100
+        # Debug info (not shown to user)
+        '_raw_confidence': confidence,
+        '_rsi': rsi,
+        '_macd': macd_signal,
     }
 
 
 # ─── X/Twitter Scraper ────────────────────────────────────────
 
 def scrape_x(ticker: str, max_results: int = 20) -> list[dict]:
-    """Scrape X for Elliott Wave posts about a ticker.
-    
-    Uses xurl CLI for X API access.
-    Returns list of classified posts.
-    """
+    """Scrape X for EW posts about a ticker."""
     classifications = []
-    
-    # Search queries targeting EW content
     queries = [
         f'{ticker} elliott wave',
         f'{ticker} EW analysis',
         f'{ticker} wave count',
     ]
     
-    # Try xurl search
-    try:
-        import subprocess
-        import json as json_mod
-        
-        for query in queries:
-            try:
-                result = subprocess.run(
-                    ['node', '/Users/clawbox/.openclaw/workspace/tradingview-mcp/src/cli/index.js',
-                     'search', query, '--max-results', str(max_results // len(queries))],
-                    capture_output=True, text=True, timeout=30,
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    # xurl would return tweets — for now use xurl directly
-                    pass
-            except Exception:
-                pass
-        
-        # Use xurl CLI instead
-        for query in queries:
-            try:
-                result = subprocess.run(
-                    ['xurl', 'search', query, '--max-results', str(max_results // len(queries))],
-                    capture_output=True, text=True, timeout=30,
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    data = json_mod.loads(result.stdout)
-                    tweets = data if isinstance(data, list) else data.get('tweets', data.get('data', []))
-                    for tweet in tweets:
-                        text = tweet.get('text', tweet.get('content', ''))
-                        if text:
-                            classifications.append(classify_text(text))
-            except Exception as e:
-                logger.debug(f"X search failed for '{query}': {e}")
-    
-    except Exception as e:
-        logger.warning(f"X scraping failed: {e}")
+    for query in queries:
+        try:
+            import subprocess
+            import json as json_mod
+            result = subprocess.run(
+                ['xurl', 'search', query, '--max-results', str(max_results // len(queries))],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                data = json_mod.loads(result.stdout)
+                tweets = data if isinstance(data, list) else data.get('data', [])
+                for tweet in tweets:
+                    text = tweet.get('text', tweet.get('content', ''))
+                    if text:
+                        classifications.append(classify_text(text))
+        except Exception as e:
+            logger.debug(f"X search failed for '{query}': {e}")
     
     return classifications
 
@@ -241,23 +436,22 @@ REDDIT_SUBREDDITS = [
     'StockMarket', 'Daytrading', 'CryptoCurrency',
 ]
 
+
 def scrape_reddit(ticker: str, max_results: int = 20) -> list[dict]:
     """Scrape Reddit for EW posts about a ticker."""
     classifications = []
-    
-    ticker_lower = ticker.lower().replace('-usd', '').replace('usdt', '')
+    ticker_clean = ticker.lower().replace('-usd', '').replace('usdt', '')
     
     for sub in REDDIT_SUBREDDITS:
         try:
             url = f"https://www.reddit.com/r/{sub}/search.json"
             params = {
-                'q': f'{ticker_lower} elliott OR wave OR EW',
+                'q': f'{ticker_clean} elliott OR wave OR EW',
                 'sort': 'new',
                 'limit': min(max_results // len(REDDIT_SUBREDDITS), 10),
-                't': 'day',  # Last 24 hours
+                't': 'day',
             }
             headers = {'User-Agent': 'StockAnalyst/1.0'}
-            
             resp = requests.get(url, params=params, headers=headers, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
@@ -266,7 +460,7 @@ def scrape_reddit(ticker: str, max_results: int = 20) -> list[dict]:
                     title = post.get('data', {}).get('title', '')
                     selftext = post.get('data', {}).get('selftext', '')
                     text = f"{title} {selftext}"
-                    if ticker_lower in text.lower() or ticker.lower() in text.lower():
+                    if ticker_clean in text.lower():
                         classifications.append(classify_text(text))
         except Exception as e:
             logger.debug(f"Reddit scrape failed for r/{sub}: {e}")
@@ -274,141 +468,58 @@ def scrape_reddit(ticker: str, max_results: int = 20) -> list[dict]:
     return classifications
 
 
-# ─── Structure Validator ──────────────────────────────────────
-
-def validate_against_structure(
-    sentiment: dict,
-    rsi: Optional[float] = None,
-    macd_signal: Optional[str] = None,
-    price_vs_ma20: Optional[str] = None,  # 'above' or 'below'
-    change_pct: Optional[float] = None,
-) -> dict:
-    """Validate crowd sentiment against price structure.
-    
-    Returns: {
-        'direction': 'UP' | 'DOWN' | 'FLAT',
-        'confidence': float,
-        'validation': 'confirmed' | 'divergent' | 'neutral',
-        'reason': str,
-    }
-    """
-    sent_dir = sentiment.get('direction', 'FLAT')
-    sent_conf = sentiment.get('confidence', 0.50)
-    
-    # Build structure signals
-    structure_signals = []
-    
-    if rsi is not None:
-        if rsi > 70:
-            structure_signals.append('overbought')  # Bearish signal
-        elif rsi < 30:
-            structure_signals.append('oversold')  # Bullish signal
-    
-    if macd_signal:
-        structure_signals.append(f'macd_{macd_signal}')
-    
-    if price_vs_ma20:
-        structure_signals.append(f'price_{price_vs_ma20}_ma20')
-    
-    # Check for divergence
-    structure_dir = 'FLAT'
-    if rsi is not None:
-        if rsi < 30:
-            structure_dir = 'UP'
-        elif rsi > 70:
-            structure_dir = 'DOWN'
-    
-    if macd_signal == 'bullish':
-        structure_dir = 'UP' if structure_dir != 'DOWN' else 'FLAT'
-    elif macd_signal == 'bearish':
-        structure_dir = 'DOWN' if structure_dir != 'UP' else 'FLAT'
-    
-    # Divergence detection
-    if sent_dir == 'UP' and structure_dir == 'DOWN':
-        validation = 'divergent'
-        reason = f"Crowd bullish but structure bearish (RSI={rsi}, {macd_signal})"
-        confidence = max(0.50, sent_conf * 0.6)  # Reduce confidence on divergence
-    elif sent_dir == 'DOWN' and structure_dir == 'UP':
-        validation = 'divergent'
-        reason = f"Crowd bearish but structure bullish (RSI={rsi}, {macd_signal})"
-        confidence = max(0.50, sent_conf * 0.6)
-    elif sent_dir == structure_dir and sent_dir != 'FLAT':
-        validation = 'confirmed'
-        reason = f"Sentiment confirmed by structure (RSI={rsi}, {macd_signal})"
-        confidence = min(0.85, sent_conf * 1.2)  # Boost on confirmation
-    else:
-        validation = 'neutral'
-        reason = f"No strong structure signal to validate (RSI={rsi})"
-        confidence = sent_conf
-    
-    return {
-        'direction': sent_dir if validation != 'divergent' else structure_dir,
-        'confidence': confidence,
-        'validation': validation,
-        'reason': reason,
-    }
-
-
 # ─── Main Entry Point ─────────────────────────────────────────
 
 def get_ew_sentiment(
     ticker: str,
-    rsi: Optional[float] = None,
+    rsi: float = 50,
     macd_signal: Optional[str] = None,
-    price_vs_ma20: Optional[str] = None,
-    change_pct: Optional[float] = None,
+    price_vs_ma20: str = 'neutral',
+    change_pct: float = 0,
 ) -> dict:
-    """Get Elliott Wave sentiment signal for a ticker.
+    """Get validated Elliott Wave analysis for a ticker.
     
-    Returns: {
-        'direction': 'UP' | 'DOWN' | 'FLAT',
-        'confidence': float,
-        'sources': int,
-        'consensus': str,
-        'validation': str,
-        'reason': str,
-    }
+    Returns a clean, trader-facing analysis — no social data exposed.
     """
-    logger.info(f"EW Sentiment: Scraping for {ticker}...")
+    logger.info(f"EW Sentiment: Analyzing {ticker}...")
     
     # Scrape all sources
     x_results = scrape_x(ticker, max_results=15)
     reddit_results = scrape_reddit(ticker, max_results=15)
-    
     all_results = x_results + reddit_results
     
     if not all_results:
-        logger.info(f"EW Sentiment: No results found for {ticker}")
+        logger.info(f"EW Sentiment: No data for {ticker}")
         return {
             'direction': 'FLAT',
-            'confidence': 0.50,
-            'sources': 0,
-            'consensus': 'no_data',
-            'validation': 'neutral',
-            'reason': 'No EW sentiment data found',
+            'wave': None,
+            'timeframe': '4-hour',
+            'description': 'No clear EW pattern detected',
+            'validation': 'no_data',
+            'validation_desc': 'Insufficient data for EW analysis',
+            'confidence_index': 0,
+            'available': False,
         }
     
     # Aggregate
-    aggregated = aggregate_sentiments(all_results)
-    logger.info(f"EW Sentiment ({ticker}): {aggregated['consensus']} "
-                f"({aggregated['bull_count']}B/{aggregated['bear_count']}S/"
-                f"{aggregated['neutral_count']}N) "
-                f"direction={aggregated['direction']} conf={aggregated['confidence']:.1%}")
+    aggregated = aggregate_classifications(all_results)
+    logger.info(f"EW Sentiment ({ticker}): {aggregated['direction']} wave={aggregated['wave']} "
+                f"tf={aggregated['timeframe']} ({aggregated['count']} sources)")
     
     # Validate against structure
-    validated = validate_against_structure(
-        aggregated, rsi=rsi, macd_signal=macd_signal,
-        price_vs_ma20=price_vs_ma20, change_pct=change_pct,
+    validated = validate_ew_against_structure(
+        aggregated,
+        rsi=rsi,
+        macd_signal=macd_signal,
+        price_vs_ma20=price_vs_ma20,
+        change_pct=change_pct,
     )
     
-    return {
-        'direction': validated['direction'],
-        'confidence': validated['confidence'],
-        'sources': aggregated['count'],
-        'consensus': aggregated['consensus'],
-        'validation': validated['validation'],
-        'reason': validated['reason'],
-        'bull_count': aggregated['bull_count'],
-        'bear_count': aggregated['bear_count'],
-        'avg_wave': aggregated['avg_wave'],
-    }
+    validated['available'] = True
+    validated['count'] = aggregated['count']
+    
+    logger.info(f"EW Validated ({ticker}): {validated['description']} "
+                f"confidence={validated['confidence_index']}/100 "
+                f"validation={validated['validation']}")
+    
+    return validated

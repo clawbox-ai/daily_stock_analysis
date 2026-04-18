@@ -289,7 +289,8 @@ def set_email(telegram_id: int, email: str) -> bool:
 def set_email_schedule(telegram_id: int, email: str, timezone: str, delivery_time: str, update_time_change: bool = False) -> bool:
     """Set email, timezone, and delivery time for Pro email delivery"""
     if update_time_change:
-        now = datetime.now(timezone.utc).isoformat()
+        from datetime import timezone as _tz
+        now = datetime.now(_tz.utc).isoformat()
         with _get_conn() as conn:
             cursor = conn.execute(
                 "UPDATE users SET email = ?, timezone = ?, delivery_time = ?, delivery_time_change = ? WHERE telegram_id = ?",

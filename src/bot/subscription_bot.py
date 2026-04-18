@@ -34,6 +34,7 @@ from telegram.ext import (
 )
 
 from src.bot import db
+from src.bot.ew_sentiment import get_ew_sentiment
 from src.bot.tiers import (
     TIER_FREE,
     TIER_PRO,
@@ -386,7 +387,7 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"• City: {city} ({tz_display})\n"
                 f"• Delivery: {schedule['delivery_time']} local time\n"
                 f"• Frequency: Once daily\n\n"
-                f"_⚠️ Email delivery coming soon — settings are saved and ready!_",
+                f"Email delivery is active ✅",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
@@ -961,7 +962,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"• City: {city} ({tz_display})\n"
                 f"• Delivery: {schedule['delivery_time']} local time\n"
                 f"• Frequency: Once daily\n\n"
-                f"_Email delivery coming soon — settings saved!_",
+                f"Email delivery is active ✅",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
@@ -1017,26 +1018,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if timezone:
             schedule = db.get_email_schedule(user.id)
             email = schedule.get("email")
+            # Save city regardless of email status
+            db.set_email_schedule(user.id, email, timezone, schedule.get("delivery_time", "08:00"))
+            offset = get_utc_offset_display(timezone)
+            keyboard = [
+                [InlineKeyboardButton("🕐 Set Time", callback_data="email_time_prompt")],
+                [InlineKeyboardButton("📧 Email Settings", callback_data="cmd_email_view")],
+            ]
             if email:
-                db.set_email_schedule(user.id, email, timezone, schedule.get("delivery_time", "08:00"))
-                offset = get_utc_offset_display(timezone)
-                keyboard = [
-                    [InlineKeyboardButton("🕐 Change Time", callback_data="email_time_prompt")],
-                    [InlineKeyboardButton("📧 Email Settings", callback_data="cmd_email_view")],
-                ]
                 await query.edit_message_text(
                     f"✅ City set to *{city_name.title()}* ({offset})\n\n"
                     f"📧 Delivery at {schedule.get('delivery_time', '08:00')} your local time.\n\n"
-                    f"_⚠️ Email delivery coming soon — settings saved!_",
+                    f"Email delivery is active ✅",
                     parse_mode=ParseMode.MARKDOWN,
                     reply_markup=InlineKeyboardMarkup(keyboard),
                 )
             else:
+                keyboard.append([InlineKeyboardButton("📧 Set Email", callback_data="email_set_prompt")])
                 await query.edit_message_text(
-                    f"✅ City: *{city_name.title()}*\n\n"
-                    f"⚠️ Set your email first!\n"
-                    f"Type: `/email your@email.com`",
+                    f"✅ City set to *{city_name.title()}* ({offset})\n\n"
+                    f"⚠️ Set your email to activate delivery:\n"
+                    f"Type `/email your@email.com`",
                     parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
                 )
         else:
             await query.edit_message_text(
@@ -1075,17 +1079,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data.startswith("email_time_"):
         time_input = data.replace("email_time_", "")
         schedule = db.get_email_schedule(user.id)
+        # Check once-per-day limit for delivery time changes
+        if not db.can_change_delivery_time(user.id):
+            await query.edit_message_text(
+                "⏰ You can only change your delivery time once per day.\n\n"
+                "Try again tomorrow or contact support.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        # Save time regardless of email status
+        db.set_email_schedule(user.id, schedule.get("email"), schedule.get("timezone"), time_input, update_time_change=True)
+        tz_display = schedule.get("timezone") or "UTC"
+        keyboard = []
         if schedule.get("email"):
-            # Check once-per-day limit for delivery time changes
-            if not db.can_change_delivery_time(user.id):
-                await query.edit_message_text(
-                    "⏰ You can only change your delivery time once per day.\n\n"
-                    "Try again tomorrow or contact support.",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-                return
-            db.set_email_schedule(user.id, schedule["email"], schedule.get("timezone"), time_input, update_time_change=True)
-            tz_display = schedule.get("timezone") or "UTC"
             keyboard = [
                 [InlineKeyboardButton("📧 Email Settings", callback_data="cmd_email_view")],
             ]
@@ -1097,10 +1103,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
         else:
+            keyboard = [
+                [InlineKeyboardButton("📧 Set Email", callback_data="email_set_prompt")],
+            ]
             await query.edit_message_text(
-                f"⚠️ Set your email first!\n\n"
-                f"Type: `/email your@email.com`",
+                f"✅ Delivery time set to *{time_input}* ({tz_display})\n\n"
+                f"⚠️ Set your email to activate delivery:\n"
+                f"Type `/email your@email.com`",
                 parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
 
     elif data == "email_off":
@@ -1174,7 +1185,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"• City: {city} ({tz_display})\n"
                 f"• Delivery: {schedule['delivery_time']} local time\n"
                 f"• Frequency: Once daily\n\n"
-                f"_⚠️ Email delivery coming soon — settings are saved and ready!_",
+                f"Email delivery is active ✅",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
@@ -1225,18 +1236,47 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
 
     elif data == "upgrade_pro":
+        keyboard = [
+            [InlineKeyboardButton("💰 Pay Now", callback_data="cmd_pay")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="cmd_start")],
+        ]
         await query.edit_message_text(
             "💎 *Upgrade to Pro*\n\n"
             "Pro plan includes:\n"
-            "• Unlimited custom watchlist\n"
+            "• Unlimited custom watchlist (up to 20 stocks)\n"
             "• On-demand stock analysis\n"
             "• Daily market review\n"
+            "• Email delivery\n"
             "• Priority processing\n\n"
             "*Price: $9/month*\n\n"
-            "To upgrade, contact @admin or use the payment link below.\n\n"
-            "_Payment integration coming soon!_",
+            "Pay with TRON USDT (TRC-20) — tap Pay Now!",
             parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
+
+    elif data == "cmd_pay":
+        # Reuse the /pay command text
+        tier = db.get_user(user.id).get("tier", "free") if db.get_user(user.id) else "free"
+        if tier == "pro":
+            await query.edit_message_text(
+                "💎 You're already on Pro!\n\n"
+                "Your subscription is active.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="cmd_start")]]),
+            )
+        else:
+            from src.bot.payment import get_payment_info
+            info = get_payment_info(user.id)
+            await query.edit_message_text(
+                "💰 *Upgrade to Pro — $9/month*\n\n"
+                "Send **9 USDT** via TRON (TRC-20):\n\n"
+                f"Wallet: `{info['tron_wallet']}`\n"
+                f"Memo: `{info['memo']}`\n\n"
+                "After sending, use /check to verify.\n\n"
+                "_Use /pay for full payment details._",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Check Payment", callback_data="pay_check_tron"), InlineKeyboardButton("⬅️ Back", callback_data="cmd_start")]]),
+            )
 
     elif data == "noop":
         # Free tier placeholder - no action
@@ -1459,6 +1499,25 @@ def _direct_llm_analysis(ticker: str) -> str:
     # Step 1b: Calculate deterministic score from math (same input = same output)
     ds = _calculate_deterministic_score(price_data)
 
+    # Step 1c: Get Elliott Wave sentiment (Pro only)
+    ew_sentiment = None
+    try:
+        db_user = db.get_user(telegram_id) if telegram_id else None
+        if db_user and db_user.get("tier") == "pro":
+            macd_signal = "bullish" if ds.get("macd_bullish") else ("bearish" if price_data.get("MACD Signal", "").startswith("Bear") else None)
+            price_vs_ma20 = "above" if ds.get("price_above_dma20") else "below"
+            ew_sentiment = get_ew_sentiment(
+                ticker,
+                rsi=ds.get("rsi", 50),
+                macd_signal=macd_signal,
+                price_vs_ma20=price_vs_ma20,
+                change_pct=ds.get("change_pct", 0),
+            )
+            logger.info(f"EW Sentiment for {ticker}: {ew_sentiment['direction']} @ {ew_sentiment['confidence']:.1%} "
+                       f"({ew_sentiment['consensus']}, {ew_sentiment['validation']})")
+    except Exception as e:
+        logger.warning(f"EW Sentiment failed for {ticker}: {e}")
+
     # Step 2: Get LLM API key
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
@@ -1480,7 +1539,7 @@ def _direct_llm_analysis(ticker: str) -> str:
                 continue
 
     if not api_key:
-        return _format_deterministic_report(ticker, price_data, ds)
+        return _format_deterministic_report(ticker, price_data, ds, ew_sentiment)
 
     # Build price context
     price_context = ""
@@ -1559,8 +1618,33 @@ def _direct_llm_analysis(ticker: str) -> str:
         f"4. No major negative catalysts: [Pass / Fail]\n"
         f"5. RSI not extreme (20-80): [Pass / Fail]\n"
         f"6. Trend direction clear: [Pass / Fail]\n\n"
-        f"Be SPECIFIC with dollar amounts. Use the data to calculate real levels. "
-        f"Keep under 700 words. Use Markdown."
+    )
+
+    # Add EW sentiment section for Pro users
+    if ew_sentiment and ew_sentiment.get('sources', 0) > 0:
+        ew_dir = ew_sentiment['direction']
+        if ew_dir == 'UP':
+            ew_emoji = "\U0001f535"
+        elif ew_dir == 'DOWN':
+            ew_emoji = "\U0001f534"
+        else:
+            ew_emoji = "\U0001f7e1"
+        prompt += (
+            f"\n*\U0001f30a Elliott Wave Sentiment* (Pro)\n"
+            f"{ew_emoji} Crowd: {ew_sentiment['direction']} @ {ew_sentiment['confidence']:.0%}\n"
+            f"\U0001f4ca Sources: {ew_sentiment['sources']} posts "
+            f"({ew_sentiment['bull_count']}B/{ew_sentiment['bear_count']}S/{ew_sentiment.get('neutral_count', 0)}N)\n"
+            f"\U0001f9ec Wave consensus: {ew_sentiment['consensus']}"
+        )
+        if ew_sentiment.get('avg_wave'):
+            prompt += f" (avg wave {ew_sentiment['avg_wave']:.0f})"
+        prompt += (
+            f"\n\U0001f504 Validation: {ew_sentiment['validation']} — {ew_sentiment['reason']}\n"
+        )
+
+    prompt += (
+        "Be SPECIFIC with dollar amounts. Use the data to calculate real levels. "
+        "Keep under 700 words. Use Markdown."
     )
 
     try:
@@ -1595,10 +1679,10 @@ def _direct_llm_analysis(ticker: str) -> str:
             return analysis
         else:
             logger.error("OpenAI API error: %d %s", resp.status_code, resp.text[:200])
-            return _format_deterministic_report(ticker, price_data, ds)
+            return _format_deterministic_report(ticker, price_data, ds, ew_sentiment)
     except Exception as e:
         logger.error("Direct LLM analysis failed: %s", e)
-        return _format_deterministic_report(ticker, price_data, ds)
+        return _format_deterministic_report(ticker, price_data, ds, ew_sentiment)
 
 
 def _fetch_comprehensive_data(ticker: str) -> dict:
@@ -1696,7 +1780,7 @@ def _fetch_comprehensive_data(ticker: str) -> dict:
     return data
 
 
-def _format_deterministic_report(ticker: str, price_data: dict, ds: dict) -> str:
+def _format_deterministic_report(ticker: str, price_data: dict, ds: dict, ew_sentiment: dict = None) -> str:
     """Full deterministic report when no LLM is available — score from math, not guessing"""
 
     # Determine direction line
@@ -1734,6 +1818,24 @@ def _format_deterministic_report(ticker: str, price_data: dict, ds: dict) -> str
         f"",
         f"_Full narrative analysis requires Pro API key._",
     ])
+
+    # Add EW sentiment section for Pro users
+    if ew_sentiment and ew_sentiment.get("sources", 0) > 0:
+        ew_dir = ew_sentiment["direction"]
+        if ew_dir == "UP":
+            ew_emoji = "🔵"
+        elif ew_dir == "DOWN":
+            ew_emoji = "🔴"
+        else:
+            ew_emoji = "🟡"
+        lines.extend([
+            "",
+            f"*🌊 Elliott Wave Sentiment* _(Pro)_",
+            f"{ew_emoji} Crowd: {ew_sentiment['direction']} @ {ew_sentiment['confidence']:.0%}",
+            f"📊 Sources: {ew_sentiment['sources']} posts ({ew_sentiment['bull_count']}B/{ew_sentiment['bear_count']}S/{ew_sentiment.get('neutral_count', 0)}N)",
+            f"🧬 Consensus: {ew_sentiment['consensus']}" + (f" (avg wave {ew_sentiment['avg_wave']:.0f})" if ew_sentiment.get('avg_wave') else ""),
+            f"🔄 Validation: {ew_sentiment['validation']} — {ew_sentiment['reason']}",
+        ])
 
     return "\n".join(lines)
 

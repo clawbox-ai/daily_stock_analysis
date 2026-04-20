@@ -1713,21 +1713,22 @@ def _ticker_to_binance_symbol(ticker: str) -> str:
 
 
 def _get_ticker_description(ticker: str) -> str:
-    """Fetch company/asset name from Yahoo Finance. Cached in memory."""
+    """Fetch company/asset name from Yahoo Finance v8 chart meta. Cached in memory."""
     if ticker in _ticker_desc_cache:
         return _ticker_desc_cache[ticker]
 
     import requests as http_requests
     name = ""
     try:
-        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={ticker}"
+        # Use v8 chart endpoint which includes shortName/longName in meta
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1d&interval=1d"
         headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
         resp = http_requests.get(url, headers=headers, timeout=8)
         if resp.status_code == 200:
-            result = resp.json().get("quoteResponse", {}).get("result", [])
-            if result:
-                quote = result[0]
-                name = quote.get("shortName") or quote.get("longName") or ""
+            chart = resp.json().get("chart", {}).get("result", [])
+            if chart:
+                meta = chart[0].get("meta", {})
+                name = meta.get("shortName") or meta.get("longName") or ""
     except Exception as e:
         logger.debug("Ticker description fetch failed for %s: %s", ticker, e)
 
@@ -1843,6 +1844,11 @@ def _fetch_comprehensive_data(ticker: str) -> dict:
         meta = chart[0].get("meta", {})
         indicators = chart[0].get("indicators", {})
         quotes = indicators.get("quote", [{}])[0] if indicators.get("quote") else {}
+
+        # Cache company name from meta (avoid extra API call in _get_ticker_description)
+        name = meta.get("shortName") or meta.get("longName") or ""
+        if name:
+            _ticker_desc_cache[ticker] = name
 
         # Price data
         data["Price"] = f"{meta.get('currency', 'USD')} {meta.get('regularMarketPrice', 'N/A')}"

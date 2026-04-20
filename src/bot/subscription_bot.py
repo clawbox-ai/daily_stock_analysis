@@ -1543,12 +1543,17 @@ def _direct_llm_analysis(ticker: str, telegram_id: int = None) -> str:
         return _format_deterministic_report(ticker, price_data, ds, ew_sentiment)
 
     # Build price context
+    # Get company name for header
+    company_name = _get_ticker_description(ticker)
+    header_name = f"{ticker} — {company_name}" if company_name else ticker
+
     price_context = ""
     if price_data:
         price_lines = []
         for key, value in price_data.items():
-            if value is not None and value != "":
-                price_lines.append(f"{key}: {value}")
+            if key.startswith("_") or value is None or value == "":
+                continue
+            price_lines.append(f"{key}: {value}")
         if price_lines:
             price_context = "\nCurrent market data:\n" + "\n".join(price_lines)
 
@@ -1579,7 +1584,7 @@ def _direct_llm_analysis(ticker: str, telegram_id: int = None) -> str:
         f"- Price Change: {ds['change_pct']:+.1f}%\n"
         f"- Price above 20DMA: {'Yes' if ds['price_above_dma20'] else 'No'}\n\n"
         f"Produce the COMPLETE analysis in this EXACT format:\n\n"
-        f"📊 *{ticker} — Decision Score: {ds['score']}*\n\n"
+        f"📊 *{header_name} | Score: {ds['score']}*\n\n"
         f"*Signal:* {sig_emoji} *{ds['signal']}*\n"
         f"*Action:* {act_emoji} *{ds['action']}*\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1598,7 +1603,17 @@ def _direct_llm_analysis(ticker: str, telegram_id: int = None) -> str:
         f"*Market Snapshot*\n"
         f"• Price: [from data] | Change: [from data] | Volume: [from data]\n"
         f"• MA Alignment: {ds['ma_alignment']} | Trend Strength: {ds['trend_strength']}/100\n"
-        f"• Bias from MA20: [calculate from data]\n\n"
+        f"• Bias from MA20: [calculate from data]\n"
+    )
+
+    # Add data source for crypto tickers
+    data_source = price_data.get("_source", "Yahoo Finance")
+    if _is_crypto_ticker(ticker):
+        prompt += f"• Source: {data_source}\n\n"
+    else:
+        prompt += "\n"
+
+    prompt += (
         f"*Key Levels*\n"
         f"🟢 Support: [3 specific price levels from data]\n"
         f"🔴 Resistance: [3 specific price levels from data]\n\n"
@@ -1660,12 +1675,12 @@ def _direct_llm_analysis(ticker: str, telegram_id: int = None) -> str:
             data = resp.json()
             analysis = data["choices"][0]["message"]["content"]
             # Force the score header to be deterministic (LLM might hallucinate a different one)
-            expected_header = f"📊 *{ticker} — Decision Score: {ds['score']}*"
+            expected_header = f"📊 *{header_name} | Score: {ds['score']}*"
             if expected_header not in analysis:
                 # Replace whatever header the LLM put with the correct one
                 import re
                 analysis = re.sub(
-                    r"📊 \*.*?— Decision Score:.*?\*",
+                    r"📊 \*.*?(?:—|\|) Score:.*?\*",
                     expected_header,
                     analysis
                 )
@@ -1678,9 +1693,138 @@ def _direct_llm_analysis(ticker: str, telegram_id: int = None) -> str:
         return _format_deterministic_report(ticker, price_data, ds, ew_sentiment)
 
 
-def _fetch_comprehensive_data(ticker: str) -> dict:
-    """Fetch comprehensive price + technical data from Yahoo Finance"""
+# Ticker description cache: ticker -> company name (avoids repeated API calls)
+_ticker_desc_cache: dict[str, str] = {}
+
+# Known crypto tickers for Binance fallback
+_CRYPTO_PREFIXES = ("BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "DOT", "LINK", "MATIC", "BNB", "SHIB")
+
+
+def _is_crypto_ticker(ticker: str) -> bool:
+    """Check if ticker is a crypto pair (e.g. BTC-USD, ETH-USD)"""
+    parts = ticker.upper().split("-")
+    return len(parts) == 2 and parts[1] == "USD" and parts[0] in _CRYPTO_PREFIXES
+
+
+def _ticker_to_binance_symbol(ticker: str) -> str:
+    """Convert Yahoo-style crypto ticker to Binance symbol: BTC-USD -> BTCUSDT"""
+    base = ticker.upper().split("-")[0]
+    return f"{base}USDT"
+
+
+def _get_ticker_description(ticker: str) -> str:
+    """Fetch company/asset name from Yahoo Finance. Cached in memory."""
+    if ticker in _ticker_desc_cache:
+        return _ticker_desc_cache[ticker]
+
     import requests as http_requests
+    name = ""
+    try:
+        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={ticker}"
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
+        resp = http_requests.get(url, headers=headers, timeout=8)
+        if resp.status_code == 200:
+            result = resp.json().get("quoteResponse", {}).get("result", [])
+            if result:
+                quote = result[0]
+                name = quote.get("shortName") or quote.get("longName") or ""
+    except Exception as e:
+        logger.debug("Ticker description fetch failed for %s: %s", ticker, e)
+
+    _ticker_desc_cache[ticker] = name
+    return name
+
+
+def _fetch_binance_data(ticker: str) -> dict:
+    """Fetch crypto data from Binance API (24/7, works on weekends).
+    Returns data in the same format as _fetch_comprehensive_data().
+    """
+    import requests as http_requests
+    from datetime import datetime, timezone
+
+    data = {}
+    binance_symbol = _ticker_to_binance_symbol(ticker)
+
+    try:
+        # Fetch 30 daily klines
+        url = f"https://api.binance.com/api/v3/klines?symbol={binance_symbol}&interval=1d&limit=30"
+        resp = http_requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            logger.warning("Binance API returned %d for %s", resp.status_code, binance_symbol)
+            return data
+
+        klines = resp.json()
+        if not klines or not isinstance(klines, list):
+            return data
+
+        # Parse klines: [open_time, open, high, low, close, volume, close_time, ...]
+        closes = [float(k[4]) for k in klines]
+        highs = [float(k[2]) for k in klines]
+        lows = [float(k[3]) for k in klines]
+        volumes = [float(k[5]) for k in klines]
+
+        current_price = closes[-1]
+        prev_close = closes[-2] if len(closes) >= 2 else closes[-1]
+        change = current_price - prev_close
+        change_pct = (change / prev_close) * 100 if prev_close else 0
+        sign = "+" if change >= 0 else ""
+
+        data["Price"] = f"USD {current_price:.2f}"
+        data["Previous Close"] = f"USD {prev_close:.2f}"
+        data["Change"] = f"{sign}{change:.2f} ({sign}{change_pct:.1f}%)"
+
+        # Volume
+        recent_vol = volumes[-5:]
+        avg_vol = sum(recent_vol) / len(recent_vol) if recent_vol else 0
+        current_vol = volumes[-1]
+        vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
+        data["Volume"] = f"{current_vol:,.0f}"
+        data["Avg Volume (5d)"] = f"{avg_vol:,.0f}"
+        data["Volume Ratio"] = f"{vol_ratio:.1f}x average"
+
+        # Highs/Lows (5d)
+        data["5d High"] = f"{max(highs[-5:]):.2f}"
+        data["5d Low"] = f"{min(lows[-5:]):.2f}"
+
+        # Moving averages
+        if len(closes) >= 20:
+            data["20DMA"] = f"{sum(closes[-20:]) / 20:.2f}"
+        if len(closes) >= 50:
+            data["50DMA"] = f"{sum(closes[-50:]) / 50:.2f}"
+
+        # RSI (14-period)
+        if len(closes) >= 15:
+            changes = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+            gains = [c for c in changes[-14:] if c > 0]
+            losses = [-c for c in changes[-14:] if c < 0]
+            avg_gain = sum(gains) / 14 if gains else 0
+            avg_loss = sum(losses) / 14 if losses else 0.001
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+            data["RSI (14)"] = f"{rsi:.1f}"
+
+        # MACD Signal (simplified: compare 12-day EMA proxy vs 26-day SMA)
+        if len(closes) >= 26:
+            ema12 = closes[-1]  # simplified proxy
+            sma26 = sum(closes[-26:]) / 26
+            macd_val = ema12 - sma26
+            data["MACD Signal"] = "Bullish" if macd_val > 0 else "Bearish"
+
+        data["_source"] = "Binance (24/7)"
+
+        logger.info("Binance data fetched for %s: price=%.2f", ticker, current_price)
+
+    except Exception as e:
+        logger.warning("Binance fetch failed for %s: %s", ticker, e)
+
+    return data
+
+
+def _fetch_comprehensive_data(ticker: str) -> dict:
+    """Fetch comprehensive price + technical data from Yahoo Finance.
+    For crypto tickers on weekends, falls back to Binance API (24/7)."""
+    import requests as http_requests
+    from datetime import datetime, timezone
 
     data = {}
     try:
@@ -1742,7 +1886,41 @@ def _fetch_comprehensive_data(ticker: str) -> dict:
     except Exception as e:
         logger.warning("Yahoo Finance fetch failed: %s", e)
 
-    # Also try to get RSI/MACD hint
+    # For crypto tickers on weekends, use Binance as fallback if Yahoo data is stale
+    is_crypto = _is_crypto_ticker(ticker)
+    is_weekend = datetime.now(timezone.utc).weekday() >= 5  # 5=Sat, 6=Sun
+    if is_crypto and is_weekend:
+        binance_data = _fetch_binance_data(ticker)
+        if binance_data:
+            # If Yahoo returned no data, use Binance entirely
+            if not data:
+                data = binance_data
+                logger.info("Using Binance data for %s (weekend, no Yahoo data)", ticker)
+            else:
+                # Check if Yahoo data is stale (latest data point is not today)
+                # Yahoo crypto often has a 1-day lag on weekends
+                # Prefer Binance for all fields since it's live 24/7
+                data = binance_data
+                logger.info("Using Binance data for %s (weekend, Yahoo may be stale)", ticker)
+
+    return data
+
+
+    # RSI/MACD from 3-month chart (supplement main data)
+    rsi_macd = _fetch_rsi_macd(ticker)
+    if rsi_macd:
+        # Only add keys that aren't already present (Binance may have set them)
+        for key, value in rsi_macd.items():
+            if key not in data:
+                data[key] = value
+
+    return data
+
+
+def _fetch_rsi_macd(ticker: str) -> dict:
+    """Fetch RSI and MACD from 3-month Yahoo chart data."""
+    import requests as http_requests
+    data = {}
     try:
         url2 = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=3mo&interval=1d"
         resp2 = http_requests.get(url2, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
@@ -1776,6 +1954,10 @@ def _fetch_comprehensive_data(ticker: str) -> dict:
 def _format_deterministic_report(ticker: str, price_data: dict, ds: dict, ew_sentiment: dict = None) -> str:
     """Full deterministic report when no LLM is available — score from math, not guessing"""
 
+    # Get company name for header
+    company_name = _get_ticker_description(ticker)
+    header_name = f"{ticker} — {company_name}" if company_name else ticker
+
     # Determine direction line
     if ds["direction"] == "LONG":
         dir_line = "🟢 Direction: LONG 📈"
@@ -1788,7 +1970,7 @@ def _format_deterministic_report(ticker: str, price_data: dict, ds: dict, ew_sen
     act_emoji = "🔵" if "Buy" in ds["action"] else ("🔴" if "Sell" in ds["action"] else "🟡")
 
     lines = [
-        f"📊 *{ticker} — Decision Score: {ds['score']}*",
+        f"📊 *{header_name} | Score: {ds['score']}*",
         f"",
         f"*Signal:* {sig_emoji} *{ds['signal']}*",
         f"*Action:* {act_emoji} *{ds['action']}*",
@@ -1798,9 +1980,15 @@ def _format_deterministic_report(ticker: str, price_data: dict, ds: dict, ew_sen
         f"*Market Snapshot*",
     ]
 
+    # Data source indicator
+    data_source = price_data.get("_source", "Yahoo Finance")
+    if _is_crypto_ticker(ticker):
+        lines.append(f"• Source: {data_source}")
+
     for key, value in price_data.items():
-        if value is not None and value != "":
-            lines.append(f"• {key}: {value}")
+        if key.startswith("_") or value is None or value == "":
+            continue
+        lines.append(f"• {key}: {value}")
 
     lines.extend([
         f"",
@@ -1835,9 +2023,13 @@ def _format_deterministic_report(ticker: str, price_data: dict, ds: dict, ew_sen
 
 def _format_price_only_report(ticker: str, price_data: dict) -> str:
     """Legacy fallback — no score data available"""
+    company_name = _get_ticker_description(ticker)
+    header_name = f"{ticker} — {company_name}" if company_name else ticker
     if price_data:
-        lines = [f"📊 *{ticker} Market Data*\n"]
+        lines = [f"📊 *{header_name} Market Data*\n"]
         for key, value in price_data.items():
+            if key.startswith("_") or value is None or value == "":
+                continue
             lines.append(f"• {key}: {value}")
         lines.append("\n_Full analysis temporarily unavailable._")
         return "\n".join(lines)
@@ -1856,8 +2048,10 @@ def _generate_dashboard(tickers: list[str], telegram_id: int) -> str:
     for ticker in tickers[:15]:  # max 15 stocks
         price_data = _fetch_comprehensive_data(ticker)
         ds = _calculate_deterministic_score(price_data)
+        company_name = _get_ticker_description(ticker)
         stock_entries.append({
             "ticker": ticker,
+            "company_name": company_name,
             "score": ds["score"],
             "signal": ds["signal"],
             "action": ds["action"],
@@ -1885,19 +2079,22 @@ def _generate_dashboard(tickers: list[str], telegram_id: int) -> str:
     if buy:
         lines.append("*🟢 Buy*")
         for s in buy:
-            lines.append(f"  • `{s['ticker']}` — Score {s['score']} | {s['signal']}")
+            name_str = f" {s['company_name']}" if s['company_name'] else ""
+            lines.append(f"  • `{s['ticker']}`{name_str} — Score {s['score']} | {s['signal']}")
         lines.append("")
 
     if watch:
         lines.append("*🟡 Watch*")
         for s in watch:
-            lines.append(f"  • `{s['ticker']}` — Score {s['score']} | {s['signal']}")
+            name_str = f" {s['company_name']}" if s['company_name'] else ""
+            lines.append(f"  • `{s['ticker']}`{name_str} — Score {s['score']} | {s['signal']}")
         lines.append("")
 
     if sell:
         lines.append("*🔴 Sell*")
         for s in sell:
-            lines.append(f"  • `{s['ticker']}` — Score {s['score']} | {s['signal']}")
+            name_str = f" {s['company_name']}" if s['company_name'] else ""
+            lines.append(f"  • `{s['ticker']}`{name_str} — Score {s['score']} | {s['signal']}")
         lines.append("")
 
     lines.append("_Use /analyze TICKER for full Battle Plan on any stock._")
